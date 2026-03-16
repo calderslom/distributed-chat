@@ -4,8 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.LinkedList;
 import java.util.Queue;
-
-import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 
 /**
  * Holds the connection context for each client or peer server connection.
@@ -24,7 +23,7 @@ import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
  * the connection.</li>
  * <li><strong>type:</strong> The type of the connection (client or peer
  * server). This is determined by the
- * connection context type in {@link ChatServer.ConnectionType}.</li>
+ * connection context type in {@link ConnectionType}.</li>
  * <li><strong>readBuffer:</strong> A buffer used for reading incoming data from
  * the socket channel.</li>
  * <li><strong>writeQueue:</strong> A queue of {@link ByteBuffer} objects that
@@ -59,8 +58,7 @@ import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
  * context, setting the initial values
  * for attributes like {@code lastActivityTime}.
  * </p>
- * 
- * @param socketChannel the {@link SocketChannel} associated with the connection
+ *
  */
 
 public class ConnectionContext {

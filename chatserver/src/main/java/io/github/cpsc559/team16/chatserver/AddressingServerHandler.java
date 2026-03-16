@@ -3,6 +3,7 @@ package io.github.cpsc559.team16.chatserver;
 import java.nio.channels.SelectionKey;
 import java.util.Map;
 
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 import io.github.cpsc559.team16.common.messaging.AckObjectTypes;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -18,6 +19,7 @@ import io.github.cpsc559.team16.common.messaging.MessageTypes;
 import io.github.cpsc559.team16.common.messaging.ServerFailureMessage;
 import io.github.cpsc559.team16.common.messaging.Roles;
 import io.github.cpsc559.team16.common.messaging.ObjectTypes;
+import static io.github.cpsc559.team16.common.utilities.DebugLogger.*;
 
 import static io.github.cpsc559.team16.chatserver.ChatServer.processSingleChatServerRecord;
 
@@ -37,40 +39,6 @@ import static io.github.cpsc559.team16.chatserver.ChatServer.processSingleChatSe
 class AddressingServerHandler implements ConnectionHandler {
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
-
-    /**
-     * Debug verbosity level, configurable via environment variable DEBUG_LEVEL
-     * (default = 5 right now to make debuggin easy).
-     */
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    // Debug level constants
-    private static final int DEBUG_NONE = 0; // No debug output (production mode)
-    private static final int DEBUG_BASIC = 1; // Basic info: startup, shutdown, major events
-    private static final int DEBUG_NORMAL = 2; // Normal operation details: connections, requests
-    private static final int DEBUG_DETAILED = 3; // Detailed flow: entering methods, decision points
-    private static final int DEBUG_LOW_LEVEL = 4; // Low-level operations: byte-level I/O, parsing
-    private static final int DEBUG_EXTREME = 5; // Extreme detail: everything, for deep debugging
-
-    /**
-     * Outputs debug logs according to the specified verbosity level.
-     *
-     * @param level   the severity/detail level of the message
-     * @param message the message content to print
-     */
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case DEBUG_BASIC -> "[BASIC] ";
-                case DEBUG_NORMAL -> "[NORMAL] ";
-                case DEBUG_DETAILED -> "[DETAILED] ";
-                case DEBUG_LOW_LEVEL -> "[LOW_LEVEL] ";
-                case DEBUG_EXTREME -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
 
     /**
      * This method is part of the {@link ConnectionHandler} interface.
@@ -285,7 +253,7 @@ class AddressingServerHandler implements ConnectionHandler {
                         continue;
 
                     ConnectionContext peerCtx = (ConnectionContext) peerKey.attachment();
-                    if (peerCtx != null && peerCtx.type == ChatServer.ConnectionType.SERVER
+                    if (peerCtx != null && peerCtx.type == ConnectionType.SERVER
                             && peerCtx.peerID == failedPeerId) {
                         debug(DEBUG_NORMAL, "[ADDR_SERVER] Closing connection to failed peer: " + failedPeerId);
                         try {
@@ -350,11 +318,10 @@ class AddressingServerHandler implements ConnectionHandler {
                 Object attachment = key.attachment();
 
                 // FIX: Verify attachment type before casting to avoid ClassCastException
-                // Your listener keys have 'ConnectionType' enums as attachments, not 'ConnectionContext'
                 if (attachment instanceof ConnectionContext) {
                     ConnectionContext ctx = (ConnectionContext) attachment;
 
-                    if (ctx.type == ChatServer.ConnectionType.ADDRESSING_SERVER) {
+                    if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
                         // Queue the message to be sent via the non-blocking write logic
                         synchronized (ctx.writeQueue) {
                             ctx.writeQueue.add(java.nio.ByteBuffer.wrap(

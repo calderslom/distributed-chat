@@ -18,9 +18,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 import io.github.cpsc559.team16.common.dto.PrimaryAddress;
 import io.github.cpsc559.team16.common.messaging.*;
 import io.github.cpsc559.team16.common.utilities.*;
+import static io.github.cpsc559.team16.common.utilities.DebugLogger.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -42,87 +44,6 @@ import io.github.cpsc559.team16.common.dto.ChatServerRecord;
  */
 // @SuppressWarnings("unused")
 public class ChatServer {
-
-    /**
-     * The current debug level for controlling verbosity of server logs.
-     * <p>
-     * This is configurable at runtime using the environment variable
-     * <b>DEBUG_LEVEL</b>.
-     * If the environment variable is not set, the default level is
-     * {@code DEBUG_EXTREME} (5),
-     * meaning all debug messages will be printed.
-     * </p>
-     * <p>
-     * Example usage in shell to reduce output to basic info only:
-     *
-     * <pre>{@code
-     * export DEBUG_LEVEL=1
-     * }</pre>
-     * </p>
-     */
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    // Debug level constants
-
-    /**
-     * Debug level: No debug output. Use in production mode where logs are minimal.
-     */
-    private static final int DEBUG_NONE = 0; // No debug output (production mode)
-
-    /**
-     * Debug level: Basic events such as startup, shutdown, and major transitions.
-     */
-    private static final int DEBUG_BASIC = 1; // Basic info: startup, shutdown, major events
-
-    /**
-     * Debug level: Normal runtime activity such as new connections or message
-     * processing.
-     */
-    private static final int DEBUG_NORMAL = 2; // Normal operation details: connections, requests
-
-    /**
-     * Debug level: Step-by-step logic, including function entry points and internal
-     * decisions.
-     */
-    private static final int DEBUG_DETAILED = 3; // Detailed flow: entering methods, decision points
-
-    /**
-     * Debug level: Low-level I/O activity like byte reads/writes and selector
-     * state.
-     */
-    private static final int DEBUG_LOW_LEVEL = 4; // Low-level operations: byte-level I/O, parsing
-
-    /**
-     * Debug level: Maximum verbosity including every possible detail.
-     * Useful for diagnosing edge cases or unexpected behavior.
-     */
-    private static final int DEBUG_EXTREME = 5; // Extreme detail: everything, for deep debugging
-
-    /**
-     * Logs a debug message to standard output if the message level is
-     * less than or equal to the configured {@link #DEBUG_LEVEL}.
-     * <p>
-     * Each message is prefixed with a tag representing its severity.
-     * This helps developers visually filter relevant messages while debugging.
-     * </p>
-     *
-     * @param level   the severity level of the message (0–5)
-     * @param message the message to log
-     */
-
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
 
     /**
      * Path to the file that stores the persistent chat log.
@@ -152,17 +73,26 @@ public class ChatServer {
     private static int ID;
 
 
+    public String getPrimaryHostAddress() {
+        return primaryHostAddress;
+    }
+
+    public void setPrimaryHostAddress(String primaryHostAddress) {
+        this.primaryHostAddress = primaryHostAddress;
+    }
+
     /**
      * Host address of the Addressing Server.
      * Retrieved dynamically using the {@link PrimaryDiscoveryReader}
      */
-    private static volatile String primaryHostAddress;
+    private volatile String primaryHostAddress;
+
 
     /**
      * Port on which the Addressing Server is listening for ChatServer connections.
      * Retrieved dynamically using the {@link PrimaryDiscoveryReader}
      */
-    private static volatile int asPort;
+    private volatile int asPort;
 
     /**
      * Port used for accepting client connections.
@@ -195,7 +125,13 @@ public class ChatServer {
      * Includes clients, peers, and the Addressing Server.
      * </p>
      */
-    private static Selector selector;
+    private Selector selector;
+
+    public ChatServerNetworkManager getNetworkManager() {
+        return networkManager;
+    }
+
+    private ChatServerNetworkManager networkManager;
 
     /**
      * Flag indicating whether this server has successfully registered with the
@@ -206,18 +142,6 @@ public class ChatServer {
      */
     private static volatile boolean registered = false;
 
-    /**
-     * Enum representing different types of connections this server can manage.
-     * <ul>
-     * <li>{@code CLIENT} — incoming user/client connection</li>
-     * <li>{@code SERVER} — connection to or from another peer chat server</li>
-     * <li>{@code ADDRESSING_SERVER} — initial registration and update
-     * coordination</li>
-     * </ul>
-     */
-    enum ConnectionType {
-        CLIENT, SERVER, ADDRESSING_SERVER
-    }
 
     /**
      * Maps each {@link ConnectionType} to its respective handler implementation.
@@ -250,34 +174,16 @@ public class ChatServer {
     private static record ServerBinding(ServerSocketChannel channel, ConnectionType type) {
     }
 
-    /**
-     * Re-reads the shared discovery file to update the current known Primary.
-     * Sets static variables {@code primaryHostAddress} and {@code asPort}
-     * PRIMARY host address and port for client connections for the ChatServer.
-     *
-     * @return A {@link PrimaryAddress} if the shared file was found and its details were loaded; null otherwise.
-     */
-    public static PrimaryAddress retrievePrimaryDetails() {
+
+    public ChatServer() {
         try {
-            PrimaryAddress details = PrimaryDiscoveryReader.readPrimaryDetails();
-            if (details != null) {
-                primaryHostAddress = details.hostAddress();
-                asPort = details.clientPort();
-                return details;
-            }
+            // Initialize the manager first
+            this.networkManager = new ChatServerNetworkManager();
+            // Point the server's selector to the manager's selector
+            this.selector = this.networkManager.getSelector();
+
         } catch (IOException e) {
-            System.err.println("Config: Error reading primary addressing server discovery file: " + e.getMessage());
-        }
-
-        return null;
-    }
-
-    private static String getThisDockerAddress() {
-        try {
-            return InetAddress.getLocalHost().getHostName();
-        } catch (UnknownHostException e) {
-            System.out.println("[Replica] Could not retrieve internal Docker address - defaulting to 'localhost'");
-            return "localhost";
+            debug(DEBUG_BASIC, "Server failed to initialize: " + e.getMessage());
         }
     }
 
@@ -320,10 +226,12 @@ public class ChatServer {
         debug(DEBUG_BASIC, "Starting NIO Server...");
         debug(DEBUG_DETAILED, "Initializing handlers and selector...");
 
+        ChatServer server = new ChatServer();
+
         // 1. Initialize the Handlers
-        handlerMap.put(ConnectionType.CLIENT, new ClientHandler());
-        handlerMap.put(ConnectionType.SERVER, new ServerHandler());
-        handlerMap.put(ConnectionType.ADDRESSING_SERVER, new AddressingServerHandler());
+        server.getNetworkManager().getHandlerMap().put(ConnectionType.CLIENT, new ClientHandler());
+        server.getNetworkManager().getHandlerMap().put(ConnectionType.SERVER, new ServerHandler());
+        server.getNetworkManager().getHandlerMap().put(ConnectionType.ADDRESSING_SERVER, new AddressingServerHandler());
 
         selector = Selector.open();
         debug(DEBUG_NORMAL, "Selector opened successfully");
@@ -348,7 +256,7 @@ public class ChatServer {
         debug(DEBUG_BASIC, String.format("Listeners ready. Clients: %d, Peers: %d", port, PEER_LISTEN_PORT));
 
         // 3. Register with Addressing Server ONLY AFTER listeners are up
-        connectToAddressingServer(selector);
+        registerWithAddressingServer(selector);
 
         while (!registered) {
             selector.select();
@@ -616,10 +524,10 @@ public class ChatServer {
      * @param selector the selector managing the main event loop; used to register
      *                 the channel
      */
-    private static void connectToAddressingServer(Selector selector) {
+    private void registerWithAddressingServer(Selector selector) {
         // Stage 1: Discovery Phase
         int discoveryAttempts = 0;
-        while (retrievePrimaryDetails() == null) {
+        while (!retrievePrimaryDetails()) {
             discoveryAttempts++;
             debug(DEBUG_BASIC, "Waiting for Addressing Server network details (Attempt " + discoveryAttempts + ")...");
             try {

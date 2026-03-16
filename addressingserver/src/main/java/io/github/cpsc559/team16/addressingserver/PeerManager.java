@@ -407,8 +407,25 @@ public class PeerManager {
     }
 
     /**
-     * Triggers a synchronization handshake.
-     * This is the entry point for REPLICA's during leader failover.
+     * Triggers a state synchronization handshake between this REPLICA and the current PRIMARY.
+     * <p>
+     * This method serves as the critical entry point for a REPLICA following a leader election
+     * or failover event. It ensures that the local node re-establishes its identity within
+     * the new PRIMARY's registry and synchronizes any divergent state.
+     * </p>
+     * * <p><b>Process Flow:</b></p>
+     * <ol>
+     * <li>Retrieves the local {@link AddrServerRecord} using the process PID.</li>
+     * <li>Constructs a {@link SyncRegisterMessage} containing the local record and a unique message ID.</li>
+     * <li>Delegates the network transmission and Selector registration to {@link #initiatePrimaryHandshake}.</li>
+     * </ol>
+     *
+     * @param record The {@link AddrServerRecord} of the target PRIMARY. If null, the method
+     * will attempt to discover the PRIMARY via the shared filesystem.
+     * @return {@code true} if the handshake message was successfully sent and the
+     * resulting channel is registered with the Selector; {@code false} otherwise.
+     * @see SyncRegisterMessage
+     * @see #initiatePrimaryHandshake(BaseAddrServerMessage, AddrServerRecord)
      */
     public boolean synchronizeWithPrimary(AddrServerRecord record) {
         AddrServerRecord myRecord = server.getAddrServerRegistry().getRecords().get(server.getConfig().getPID());
@@ -508,55 +525,12 @@ public class PeerManager {
         return false;
     }
 
-//    /**
-//     * Initializes a connection to the primary AddressingServer and sends a registration request.
-//     * <p>
-//     * This is invoked by REPLICA processes on startup to formally register themselves with the PRIMARY.
-//     * Once connected, the replica will receive back its PID and the full registry of AddrServer records.
-//     * </p>
-//     *
-//     * @param primaryHostAddress the IP address of the PRIMARY AddressingServer.
-//     * @param primaryReplicaPort the port used by the PRIMARY for peer registration.
-//     * @param clientPort         the replica’s client port.
-//     * @param peerPort           the replica’s peer communication port.
-//     * @param chatServerPort     the replica’s chat server communication port.
-//     * @return The SocketChannel used to register with the PRIMARY {@code AddressingServer}. This channel must
-//     * be registered with the {@code Selector} in the {@code AddrServerNetworkManager} for this REPLICA server.
-//     */
-//    public Optional<SocketChannel> registerWithPrimary(String primaryHostAddress, int primaryReplicaPort,
-//                                                       int clientPort, int peerPort, int chatServerPort) {
-//        try {
-//            SocketChannel channel = SocketChannel.open();
-//            channel.configureBlocking(true);
-//            channel.connect(new InetSocketAddress(primaryHostAddress, primaryReplicaPort));
-//            while (!channel.finishConnect()) {
-//                Thread.sleep(100);
-//            }
-//
-//            NIOMessageChannel nioChannel = new NIOMessageChannel(channel);
-//            peerChannels.put(channel, nioChannel);
-//            String publicAddress = getThisDockerAddress();
-//            RegisterMessage<AddrServerRecord> register =
-//                    RegisterMessage.fromReplica(publicAddress, clientPort, peerPort, chatServerPort);
-//            nioChannel.sendMessage(register.toJson());
-//
-//            channel.configureBlocking(false);
-//
-//            System.out.println("Registration from REPLICA sent to PRIMARY.");
-//            return Optional.of(channel);
-//        } catch (IOException | InterruptedException e) {
-//            System.err.println("Failed to register replica with primary: " + e.getMessage());
-//            e.printStackTrace();
-//            return Optional.empty();
-//        }
-//    }
-
     /**
      * This is a hell of an obtuse way of finding out an addressing servers role, but if you need it,
      * here you go.
      *
      * @param pid The process id of the addressing server you want to know the role of.
-     * @return An {@code ServerRole} String - REPLICA or PRIMARY
+     * @return A {@code ServerRole} String - REPLICA or PRIMARY
      */
     public String getServerRole(Long pid) {
         return this.registry.getRecords().get(pid).getRole().toString();

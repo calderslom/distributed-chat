@@ -416,9 +416,11 @@ public class LeaderElectionManager {
         // Retrieve the record of the REPLICA being promoted
         AddrServerRecord record = server.getAddrServerRegistry().getRecords().get(newLeaderPID);
         if (record != null) {
-            System.out.println("Promoting another REPLICA process to PRIMARY...");
+            System.out.println("LEM: Promoting another REPLICA process to PRIMARY...");
             record.setRole(ServerRole.PRIMARY);
-            server.getPeerManager().synchronizeWithPrimary(record);
+            if (server.getPeerManager().synchronizeWithPrimary(record)) {
+                System.out.printf("LEM: Persistent connection with PRIMARY server with PID %d established.%n",newLeaderPID);
+            }
         } else {
             System.err.println("WARNING: Critical election failure. " +
                     "No AddrServerRecord found in the registry for PID: " + newLeaderPID + ".");
