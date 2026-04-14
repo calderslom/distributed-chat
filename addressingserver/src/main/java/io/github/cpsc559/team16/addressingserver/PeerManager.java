@@ -1,23 +1,26 @@
 package io.github.cpsc559.team16.addressingserver;
 
 import java.io.IOException;
+import java.net.UnknownHostException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.UnresolvedAddressException;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ServerRole;
-import io.github.cpsc559.team16.common.messaging.AckMessage;
-import io.github.cpsc559.team16.common.messaging.BaseAddrServerMessage;
-import io.github.cpsc559.team16.common.messaging.RegisterMessage;
-import io.github.cpsc559.team16.common.messaging.UpdateMessage;
+import io.github.cpsc559.team16.common.messaging.*;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
+import io.github.cpsc559.team16.common.utilities.NetworkUtils;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * Manages peer registration, update propagation, and persistent communication
@@ -66,8 +69,8 @@ public class PeerManager {
      * @param pid the process ID to check for an existing registered replica connection
      * @return {@code true} if a connected replica with the specified PID is found; {@code false} otherwise
      */
-    public Boolean isRegistered (Long pid) {
-        for (NIOMessageChannel channel: peerChannels.values()) {
+    public Boolean isRegistered(Long pid) {
+        for (NIOMessageChannel channel : peerChannels.values()) {
             Long nioPID = channel.getServerPID();
             if (nioPID != 0L && nioPID.equals(pid)) {
                 return true;
@@ -125,6 +128,7 @@ public class PeerManager {
      * used to track state across the distributed network of AddressingServers.
      */
     private final AddrServerRegistry registry;
+
     public void debugPrintAllServers() {
         this.registry.debugPrintAllServers();
     }
@@ -145,8 +149,6 @@ public class PeerManager {
 
     /**
      * Constructs a {@code PeerManager} and binds it to a shared {@code AddrServerRegistry}.
-     *
-     * @param registry the shared registry of AddrServerRecords.
      */
     public PeerManager(AddressingServer server) {
         this.server = server;
@@ -160,31 +162,32 @@ public class PeerManager {
      * This method performs the following actions:
      * <ul>
      *   <li>Removes the mapping between the {@code SocketChannel} and its corresponding {@code NIOMessageChannel}
-     *       from the internal collection of persistent connections (e.g., in the PeerManager or ChatServerManager).</li>
-     *   <li>Removes the associated record (such as an {@code AddrServerRecord} or {@code ChatServerRecord})
+     *       from the internal collection of persistent connections in the PeerManager.</li>
+     *   <li>Removes the associated {@code AddrServerRecord}
      *       that identifies the remote process connected via the {@code SocketChannel}.</li>
      * </ul>
      * </p>
      *
      * @param channel the {@code SocketChannel} representing the connection to remove.
-     * <strong>NOTE:</strong> This method does not close the {@code SocketChannel}; closing the channel is the responsibility
-     * of the caller.
+     *                <strong>NOTE:</strong> This method does not close the {@code SocketChannel}; closing the channel is the responsibility
+     *                of the caller.
+     * @return true if a record for the remote process existed in the {@link AddrServerRegistry}; false otherwise.
      */
-    private void removeRemoteProcess(SocketChannel channel) {
+    public boolean removeRemoteProcess(SocketChannel channel) {
         NIOMessageChannel ch = this.peerChannels.get(channel);
-        if (ch != null) {
-            Long pid = ch.getServerPID();
-            if (pid != 0L) {
-                this.registry.removeRecordByKey(pid);
-                try {
-                    System.out.printf("Successfully removed *communication channels* for Network Process with PID: %d " +
-                            "- and Host Address: %s%n", pid, channel.getRemoteAddress());
-                } catch (IOException ignore) {}
-            } else {
-                System.err.println("Removed a NIOMessageChannel and SocketChannel connection for an AddressingServer with a PID = 0L that had no AddrServerRecord.");
-            }
-            this.peerChannels.remove(channel);
+        if (ch == null) return false;
+
+        Long pidFromChannel = ch.getServerPID();
+
+        // Stage 1: Remove Channel whether the process is registered or not.
+        this.peerChannels.remove(channel);
+        try {
+            System.out.printf("Purging peer connection [%s] for PID %d %n", channel.getRemoteAddress(), pidFromChannel);
+        } catch (IOException ignore) {
         }
+
+        // Stage 2: Remove any record that may exist for the peer connection from the registry
+        return this.registry.removeRecordByKey(pidFromChannel);
     }
 
     /**
@@ -200,11 +203,16 @@ public class PeerManager {
      * </p>
      *
      * @param channelToRemove the {@code SocketChannel} representing the connection to be removed and closed.
+     * @return true if a record for the remote process existed in the {@link AddrServerRegistry}; false otherwise.
      */
-    public void removeProcessCloseConnection(SocketChannel channelToRemove) {
-        this.removeRemoteProcess(channelToRemove);
-        try { channelToRemove.close(); }
-        catch(IOException ignored) {};
+    public boolean removeProcessCloseConnection(SocketChannel channelToRemove) {
+        boolean recordRemoved = this.removeRemoteProcess(channelToRemove);
+        try {
+            channelToRemove.close();
+        } catch (IOException ignored) {
+        }
+        ;
+        return recordRemoved;
     }
 
     /**
@@ -221,17 +229,70 @@ public class PeerManager {
      * </p>
      *
      * @param failedPID the process ID of the failed server to remove
+     * @return true if a record or channel corresponding to the PID was actually found and removed; false otherwise.
      */
-    public void removeFailedServer(Long failedPID) {
-        for (SocketChannel channel : peerChannels.keySet()) {
-            // NIOChannel objects should always have an instance variable set that references the PID of the remote process.
-            // We iterate through all the channels(keys) and respective NIOMessageChannels(values) until we find a match.
-            if (peerChannels.get(channel).getServerPID().equals(failedPID)) {
-                removeProcessCloseConnection(channel);
-                return;
+    public boolean removeFailedAddrServer(Long failedPID) {
+        debug(DEBUG_NORMAL, "Attempting to remove failed AddrServer: PID " + failedPID);
+        // NIOChannel objects should always have an instance variable set that references the PID of the remote process.
+        // We iterate through all the channels(keys) and respective NIOMessageChannels(values) until we find a match.
+        for (Map.Entry<SocketChannel, NIOMessageChannel> entry : peerChannels.entrySet()) {
+            if (entry.getValue().getServerPID().equals(failedPID)) {
+                debug(DEBUG_DETAILED, "Found active peer channel for AddrServer PID " + failedPID + ". Closing connection.");
+                return removeProcessCloseConnection(entry.getKey());
             }
         }
-        this.registry.removeRecordByKey(failedPID);
+
+        debug(DEBUG_NORMAL, "No active channel found for AddrServer PID " + failedPID + ". Performing registry fallback removal.");
+        return this.registry.removeRecordByKey(failedPID);
+    }
+
+    /**
+     * Synchronizes the Peer (Replica Addressing Server) registry with the current
+     * active network connections to identify and purge stale records.
+     * <p>
+     * During a leadership transition, the new Primary must reconcile its inherited
+     * registry against its actual {@code peerChannels}. If a Replica crashed during
+     * the failover, it can remain in the registry, but lack an active connection to the new PRIMARY.
+     * </p>
+     * <p>The audit is executed in three stages:</p>
+     * <ul>
+     * <li><b>Stage 1:</b> Maps all active {@code NIOMessageChannel} instances to a set of PIDs.</li>
+     * <li><b>Stage 2:</b> Identifies PIDs present in the {@code AddrServerRegistry} that
+     * do not have a corresponding active connection.</li>
+     * <li><b>Stage 3:</b> For each "ghost" PID, it triggers a system-wide failure broadcast
+     * and removes the record from the local registry to ensure cluster consistency.</li>
+     * </ul>
+     * @param myPid          The PID of this process to ensure self-exclusion from the purge.
+     * @param cleanupManager The manager used to broadcast failure messages.
+     */
+    public void auditRegistryConnections(Long myPid, ConnectionCleanupManager cleanupManager) {
+        // Stage 1: Create a set containing all REPLICA PIDs who have active connections to the PRIMARY.
+        Set<Long> connectedPids = peerChannels.values().stream()
+                .map(NIOMessageChannel::getServerPID)
+                .collect(Collectors.toSet());
+
+        // Add my (the PRIMARY addressing server) PID to ensure my record is not tagged for removal.
+        connectedPids.add(myPid);
+
+        // Stage 2: Identify any "Ghosts" (REPLICA processes who are in the registry but NOT in active connections)
+        Set<Long> failedPids = this.registry.getRecords().keySet().stream()
+                .filter(pid -> !connectedPids.contains(pid))  // if pid not in connectedPids, then collect the pid
+                .collect(Collectors.toSet());
+
+        if (failedPids.isEmpty()) {
+            debug(DEBUG_DETAILED, "AddrServer Registry audit complete: No stale records found.");
+            return;
+        }
+
+        debug(DEBUG_BASIC, "[PeerManager] An audit of the AddrServerRegistry detected ghost records. Triggering failure broadcast.");
+
+        // Stage 3: Remove all failed REPLICA processes from the registry and broadcast their failure
+        for (Long failedPid : failedPids) {
+            debug(DEBUG_BASIC, "Handling ghost record for PID: " + failedPid + ".");
+            ServerFailureMessage<Long> msg = ServerFailureMessage.addrServerFailed(myPid, Roles.PRIMARY, Roles.REPLICA, failedPid);
+            cleanupManager.broadcastFailureToReplicas(msg, myPid, failedPid, Roles.REPLICA);
+            this.registry.removeRecordByKey(failedPid);
+        }
     }
 
     /**
@@ -245,7 +306,7 @@ public class PeerManager {
      * @param socketChannel the socket channel for the replica connection.
      * @param nioChannel    the messaging channel used to communicate with the replica.
      * @param record        a partially populated record to complete and store.
-     * @throws IllegalArgumentException  if there is a mismatch between the PID stored in the NIOMessageChannel and the AddrServerRecord.
+     * @throws IllegalArgumentException if there is a mismatch between the PID stored in the NIOMessageChannel and the AddrServerRecord.
      */
     public void registerPeer(SocketChannel socketChannel, NIOMessageChannel nioChannel,
                              AddrServerRecord record) throws IllegalArgumentException {
@@ -255,8 +316,8 @@ public class PeerManager {
                     nioChannel.getServerPID(), record.getPID());
             throw new IllegalArgumentException(err);
         }
-        // Store the peer channel for future use.
-        peerChannels.put(socketChannel, nioChannel);
+        // This already occurs in AddrServerNetworkManager - channels are stored before dispatching of any kind
+        //peerChannels.put(socketChannel, nioChannel);
         // Update network topology storing the AddrServerRecord, thus updating the local state of the Primary
         registry.putAddrServerRecord(record.getPID(), record);
         System.out.println("New replica successfully registered within the network.");
@@ -323,7 +384,7 @@ public class PeerManager {
      * @param message the {@code BaseAddrServerMessage} to be serialized and sent.
      */
     public void broadcast(BaseAddrServerMessage<?> message) {
-        if (peerChannels.size() != (registry.getRecords().size()-1)) {
+        if (peerChannels.size() != (registry.getRecords().size() - 1)) {
             System.err.println("NETWORK ERROR - More address server records exist than persistent connections.\n" +
                     "Refactoring necessary.");
         }
@@ -344,61 +405,205 @@ public class PeerManager {
         }
     }
 
+
+
     /**
-     * Initializes a connection to the primary AddressingServer and sends a registration request.
-     * <p>
-     * This is invoked by REPLICA processes on startup to formally register themselves with the PRIMARY.
-     * Once connected, the replica will receive back its PID and the full registry of AddrServer records.
-     * </p>
+     * Core logic to establish a connection to the primary AddressingServer and transmit an initial message.
      *
-     * @param primaryHostAddress the IP address of the PRIMARY AddressingServer.
-     * @param primaryReplicaPort the port used by the PRIMARY for peer registration.
-     * @param clientPort         the replica’s client port.
-     * @param peerPort           the replica’s peer communication port.
-     * @param chatServerPort     the replica’s chat server communication port.
-     * @return The SocketChannel used to register with the PRIMARY {@code AddressingServer}. This channel must
-     * be registered with the {@code Selector} in the {@code AddrServerNetworkManager} for this REPLICA server.
+     * @param host    the IP address of the PRIMARY AddressingServer.
+     * @param port    the port used by the PRIMARY for registration/synchronization.
+     * @param message the initial message (Registration or Synchronization) to be sent.
+     * @return An {@link Optional} containing the connected {@code SocketChannel}, or empty if the connection failed.
      */
-    public Optional<SocketChannel> registerWithPrimary(String primaryHostAddress, int primaryReplicaPort,
-                                                       int clientPort, int peerPort, int chatServerPort) {
+    private Optional<SocketChannel> transmitDiscoveryMessage(String host, int port, BaseAddrServerMessage<?> message) {
         try {
             SocketChannel channel = SocketChannel.open();
             channel.configureBlocking(true);
-            channel.connect(new InetSocketAddress(primaryHostAddress, primaryReplicaPort));
+            channel.connect(new InetSocketAddress(host, port));
             while (!channel.finishConnect()) {
                 Thread.sleep(100);
             }
 
             NIOMessageChannel nioChannel = new NIOMessageChannel(channel);
             peerChannels.put(channel, nioChannel);
-            String publicAddress = System.getenv("PUBLIC_ADDRESS");
-            // Add a fallback if the environment variable isn't set
-            if (publicAddress == null || publicAddress.isEmpty()) {
-                // Fallback to hostname/IP detection
-                InetAddress localHost = InetAddress.getLocalHost();
-                publicAddress = localHost.getHostAddress();
-                System.out.println("WARNING: PUBLIC_ADDRESS not set in environment, using detected address: " + publicAddress);
-            } else {
-                System.out.println("Using PUBLIC_ADDRESS from environment: " + publicAddress);
-            }
-            RegisterMessage<AddrServerRecord> register =
-                    RegisterMessage.fromReplica(publicAddress, clientPort, peerPort, chatServerPort);
-            nioChannel.sendMessage(register.toJson());
+
+            nioChannel.sendMessage(message.toJson());
 
             channel.configureBlocking(false);
-
-            System.out.println("Registration from REPLICA sent to PRIMARY.");
             return Optional.of(channel);
         } catch (IOException | InterruptedException e) {
-            System.err.println("Failed to register replica with primary: " + e.getMessage());
+            System.err.println("Failed to register this replica with primary: " + e.getMessage());
             e.printStackTrace();
             return Optional.empty();
         }
     }
 
+
+    /**
+     * Triggers a registration handshake.
+     * This is the entry point for brand new Replicas.
+     */
+    public boolean registerWithPrimary() {
+        AddrServerConfig config = server.getConfig();
+        RegisterMessage<AddrServerRecord> register =
+                RegisterMessage.fromReplica(server.getMessageIDGenerator().nextID(),
+                        NetworkUtils.getSerializedIdentity(Roles.REPLICA), config.getClientPort(),
+                        config.getReplicaPort(), config.getChatServerPort());
+
+        System.out.println("Registration handshake message prepared for new process.");
+        return initiatePrimaryHandshake(register, null);
+    }
+
+    /**
+     * Triggers a synchronization handshake.
+     * This is the entry point for REPLICA's during leader failover.
+     */
+    public boolean synchronizeWithPrimary(AddrServerRecord record) {
+        AddrServerRecord myRecord = server.getAddrServerRegistry().getRecords().get(server.getConfig().getPID());
+        if (myRecord == null) {
+            System.err.println("[HANDSHAKE ERROR] Cannot sync: Local record for this process not found.");
+            return false;
+        }
+        SyncRegisterMessage<AddrServerRecord> syncMsg =
+                SyncRegisterMessage.fromReplica(server.getMessageIDGenerator().nextID(), myRecord);
+        System.out.println("Synchronization handshake message prepared for PID: " + myRecord.getPID());
+        return initiatePrimaryHandshake(syncMsg, record);
+    }
+
+    /**
+     * Unifies the connection and handshake logic for both new registrations and
+     * post-election state synchronization.
+     * <p>
+     * This method determines the appropriate message (Register vs. Sync), transmits it
+     * via {@link #transmitDiscoveryMessage(String, int, BaseAddrServerMessage)}, and then ensures the resulting channel
+     * is registered with the {@code Selector} for ongoing communication.
+     * </p>
+     *
+     * @param handshakeMsg The specific message (Register or Sync) to send.
+     * @return true if the link is established and registered with the Selector.
+     * @see AddrServerNetworkManager#openPersistentChannel(SocketChannel)
+     * @see RegisterMessage#fromReplica(long, String, int, int, int)
+     */
+    public boolean initiatePrimaryHandshake(BaseAddrServerMessage<AddrServerRecord> handshakeMsg,
+                                            AddrServerRecord knownHost) {
+
+        // Stage 1: Open the pipe, send the JSON, and add to peerChannels map
+        int attempts = 0;
+        int maxAttempts = 5;
+        Optional<SocketChannel> maybeChannel = Optional.empty();
+        // Retry Connection Loop
+        while (maybeChannel.isEmpty() && attempts < maxAttempts) {
+            String hostAddress = null;
+            int port = -1;
+            // Update the global config from the shared filesystem.
+            // Ensures every connection attempt uses the most recently published network details of the PRIMARY.
+            if (knownHost != null) {
+                hostAddress = knownHost.getHostAddress();
+                port = knownHost.getPeerPort();
+            } else if (server.getConfig().refreshPrimaryDetails()) {
+                hostAddress = server.getConfig().getPrimaryHostAddress();
+                port = server.getConfig().getPrimaryReplicaPort();
+
+            } else {
+                System.err.println("[HANDSHAKE] Primary discovery details not available.");
+                continue;
+            }
+            // Attempt the connection/handshake
+            try {
+                maybeChannel = transmitDiscoveryMessage(hostAddress, port, handshakeMsg);
+            } catch (UnresolvedAddressException e) {
+                System.err.printf("[DNS ERROR] Hostname '%s' could not be resolved. Docker networking may still be initializing.%n", hostAddress);
+                maybeChannel = Optional.empty();
+            } catch (Exception e) {
+                System.err.println("[CRITICAL] Unexpected error during handshake: " + e.getMessage());
+                maybeChannel = Optional.empty();
+            }
+
+
+            if (maybeChannel.isEmpty()) {
+                attempts++;
+                if (attempts < maxAttempts) {
+                    long sleepTime = (long) Math.pow(2, attempts - 1) * 1000;
+                    System.err.printf("[HANDSHAKE] Connection failed. Retrying in %d seconds (Attempt %d/%d)...%n",
+                            sleepTime / 1000, attempts, maxAttempts);
+                    try {
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Stage 3: Register with the Selector to allow the AddrServerNetworkManager to receive messages from the PRIMARY.
+        if (maybeChannel.isPresent()) {
+            SocketChannel channel = maybeChannel.get();
+            try {
+                this.server.getNetworkManager().openPersistentChannel(channel);
+            } catch (IOException e) {
+                System.err.println("[HANDSHAKE ERROR] Failed to register channel with Selector: " + e.getMessage());
+                // Cleanup the map entry if the Selector registration fails
+                peerChannels.remove(channel);
+                try {
+                    channel.close();
+                } catch (IOException ignored) {
+                }
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+
+//    /**
+//     * Initializes a connection to the primary AddressingServer and sends a registration request.
+//     * <p>
+//     * This is invoked by REPLICA processes on startup to formally register themselves with the PRIMARY.
+//     * Once connected, the replica will receive back its PID and the full registry of AddrServer records.
+//     * </p>
+//     *
+//     * @param primaryHostAddress the IP address of the PRIMARY AddressingServer.
+//     * @param primaryReplicaPort the port used by the PRIMARY for peer registration.
+//     * @param clientPort         the replica’s client port.
+//     * @param peerPort           the replica’s peer communication port.
+//     * @param chatServerPort     the replica’s chat server communication port.
+//     * @return The SocketChannel used to register with the PRIMARY {@code AddressingServer}. This channel must
+//     * be registered with the {@code Selector} in the {@code AddrServerNetworkManager} for this REPLICA server.
+//     */
+//    public Optional<SocketChannel> registerWithPrimary(String primaryHostAddress, int primaryReplicaPort,
+//                                                       int clientPort, int peerPort, int chatServerPort) {
+//        try {
+//            SocketChannel channel = SocketChannel.open();
+//            channel.configureBlocking(true);
+//            channel.connect(new InetSocketAddress(primaryHostAddress, primaryReplicaPort));
+//            while (!channel.finishConnect()) {
+//                Thread.sleep(100);
+//            }
+//
+//            NIOMessageChannel nioChannel = new NIOMessageChannel(channel);
+//            peerChannels.put(channel, nioChannel);
+//            String publicAddress = getThisDockerAddress();
+//            RegisterMessage<AddrServerRecord> register =
+//                    RegisterMessage.fromReplica(publicAddress, clientPort, peerPort, chatServerPort);
+//            nioChannel.sendMessage(register.toJson());
+//
+//            channel.configureBlocking(false);
+//
+//            System.out.println("Registration from REPLICA sent to PRIMARY.");
+//            return Optional.of(channel);
+//        } catch (IOException | InterruptedException e) {
+//            System.err.println("Failed to register replica with primary: " + e.getMessage());
+//            e.printStackTrace();
+//            return Optional.empty();
+//        }
+//    }
+
     /**
      * This is a hell of an obtuse way of finding out an addressing servers role, but if you need it,
      * here you go.
+     *
      * @param pid The process id of the addressing server you want to know the role of.
      * @return An {@code ServerRole} String - REPLICA or PRIMARY
      */
@@ -410,7 +615,8 @@ public class PeerManager {
      * Returns the network process ID (PID) of the current Primary Addressing Server
      * by looking through all the current AddrServer records in the network.
      *
-     * @return A Long integer containing the PID of the Primary Addressing Server.
+     * @return A Long integer containing the PID of the Primary Addressing Server or
+     * 0L to indicate no primary was found in the records.
      */
     public Long getPrimaryPID() {
 
@@ -418,15 +624,9 @@ public class PeerManager {
 
         for (AddrServerRecord record : registry.getRecords().values()) {
             if (record.getRole().equals(ServerRole.PRIMARY)) {
-
-                if (primaryPID != 0L) {
-                    System.err.println("WARNING: More than one PRIMARY AddressingServer found in the network. Picking highest PID.");
-                }
                 primaryPID = record.getPID();
             }
         }
-
-
         return primaryPID;
     }
 
@@ -446,13 +646,14 @@ public class PeerManager {
      * </p>
      *
      * @return the {@code NIOMessageChannel} tied to the current {@code PRIMARY} {@code AddressingServer},
-     *         or {@code null} if the primary has not yet been registered or is not connected.
+     * or {@code null} if the primary has not yet been registered or is not connected.
      */
     public NIOMessageChannel getPrimaryNIOChannel() {
         Long primaryPid = this.getPrimaryPID();
-        if (primaryPid != 0L) {
+        if (primaryPid != null && primaryPid != 0L) {
             for (NIOMessageChannel ch : this.peerChannels.values()) {
-                if (ch.getServerPID().equals(primaryPid)) return ch;
+                if (ch.getSocketChannel().isOpen() && ch.getServerPID().equals(primaryPid))
+                    return ch;
             }
         }
         return null;
@@ -479,173 +680,6 @@ public class PeerManager {
         }
         return null;
     }
-
-
-
-//    /**
-//     * Updates the provided {@link AddrServerRecord} with runtime information from the given socket connection and PID.
-//     * <p>
-//     * This method is typically called during replica registration to ensure that the record accurately reflects
-//     * the replica's actual host address and assigned PID. The host address is extracted directly from the
-//     * {@link SocketChannel}'s remote address to avoid relying on potentially incorrect values sent by the remote process.
-//     * </p>
-//     *
-//     * @param socketChannel the channel representing the remote replica's connection
-//     * @param record        the {@link AddrServerRecord} instance provided by the replica
-//     * @param peerPID       the process ID assigned to the replica by the primary
-//     * @return the updated {@link AddrServerRecord} with corrected host address and assigned PID
-//     * @throws IOException if the remote address cannot be resolved from the socket
-//     */
-//    public static AddrServerRecord updateServerRecord(SocketChannel socketChannel,
-//                                               AddrServerRecord record, Long peerPID) throws IOException {
-//        // Retrieve the remote process Host Address.
-//        InetSocketAddress remoteAddress = (InetSocketAddress) socketChannel.getRemoteAddress();
-//        String replicaHostAddr = remoteAddress.getAddress().getHostAddress();
-//        // Update the incoming AddrServerRecord provided by the remote process.
-//        record.setHostAddress(replicaHostAddr);
-//        record.setPID(peerPID);
-//        return record;
-//    }
-//    /**
-//     * Sends all currently known {@code AddrServerRecord} entries from the primary
-//     * to a newly connected replica.
-//     * <p>
-//     * This ensures that the new replica is fully synchronized with the current
-//     * network topology known to the primary.
-//     * </p>
-//     *
-//     * @param primaryPID the PID of the primary server sending the updates.
-//     * @param nioChannel the channel over which to send the records.
-//     */
-//    public void sendAllAddrServerRecords(Long primaryPID, NIOMessageChannel nioChannel) throws IOException {
-//        for (AddrServerRecord record : this.registry.getRecords().values()) {
-//            UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToReplica(primaryPID, record);
-//            try {
-//                nioChannel.sendMessage(message.toJson());
-//            } catch (JsonProcessingException e) {
-//                System.err.println("Failed to serialize UpdateMessage<AddrServerRecord>: " + e.getMessage());
-//            } catch (IOException ioe) {
-//                System.err.println("Failed to send UpdateMessage<AddrServerRecord>: " + ioe.getMessage());
-//                throw ioe;
-//            }
-//        }
-//        System.out.println("Done sending all AddrServerRecords to newly registered REPLICA.");
-//    }
-
-//    /**
-//     * Sends all currently known {@code ChatServerRecord} entries in the network.
-//     * <p>
-//     * This is typicall used to ensure that a new replica is fully synchronized with all of the
-//     * active ChatServer's known to the primary.
-//     * </p>
-//     *
-//     *
-//     * @param primaryPID  the PID of the primary server sending the updates.
-//     * @param nioChannel  the channel over which to send the records.
-//     * @param chatRecords a {@code HashMap} containing all {@code ChatServerRecord} entries.
-//     */
-//    public void sendAllChatServerRecords(Long primaryPID, NIOMessageChannel nioChannel,
-//                                         Map<Long, ChatServerRecord> chatRecords) throws IOException {
-//        for (ChatServerRecord record : chatRecords.values()) {
-//            UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToReplica(primaryPID, record);
-//            try {
-//                nioChannel.sendMessage(message.toJson());
-//            } catch (JsonProcessingException e) {
-//                System.err.println("Failed to serialize UpdateMessage<ChatServerRecord>: " + e.getMessage());
-//            } catch (IOException ioe) {
-//                System.err.println("Failed to send UpdateMessage<ChatServerRecord>: " + ioe.getMessage());
-//                throw ioe;
-//            }
-//        }
-//        System.out.println("Done sending all ChatServerRecords to newly registered REPLICA.");
-//    }
-//    /**
-//     * Sends a single {@link AddrServerRecord} to all the process tied to the NIOChannel.
-//     * <p>
-//     * This method is used by the PRIMARY {@code AddressingServer} to notify all registered
-//     * REPLICA servers about a new or updated {@code AddrServerRecord} - a necessary part of
-//     * maintaining network consistency.
-//     * </p>
-//     *
-//     * @param primaryPID the PID of the primary server issuing the update.
-//     * @param record     the {@link AddrServerRecord} to broadcast.
-//     */
-//    public void sendAddrServerRecord(long messageID, Long primaryPID, AddrServerRecord record, NIOMessageChannel nioChannel) throws IOException {
-//        UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToReplica(messageID, primaryPID, record);
-//        try {
-//            nioChannel.sendMessage(message.toJson());
-//        }
-//        catch (JsonProcessingException e) {
-//            System.err.printf(
-//                    "Failed to serialize UpdateMessage<%s>. Context: messageID=%d, senderPID=%d, senderRole=%s, receiverPID=%d. Exception: %s%n",
-//                    message.getObjectType(), messageID, primaryPID, Roles.PRIMARY, nioChannel.getServerPID(), e.getMessage()
-//            );
-//        }
-//        catch (IOException ioe) {
-//            System.err.println("Failed to send UpdateMessage<AddrServerRecord> for message ID: " + message.getMessageID());
-//            throw ioe;
-//        }
-//    }
-//
-//    /**
-//     * Broadcasts a single {@link AddrServerRecord} to all connected peer replicas.
-//     * <p>
-//     * This method is used by the PRIMARY {@code AddressingServer} to notify all registered
-//     * REPLICA servers about a new or updated {@code AddrServerRecord} - a necessary part of
-//     * maintaining network consistency.
-//     * </p>
-//     *
-//     * @param primaryPID the PID of the primary server issuing the update.
-//     * @param record     the {@link AddrServerRecord} to broadcast.
-//     */
-//    public void broadcastAddrServerRecord(Long primaryPID, AddrServerRecord record) {
-//        UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToReplica(primaryPID, record);
-//        broadcastServerRecord(message);
-//    }
-//
-//    /**
-//     * Broadcasts a single {@link ChatServerRecord} to all connected peer replicas.
-//     * <p>
-//     * This method is used by the PRIMARY {@code AddressingServer} to notify all registered
-//     * REPLICA servers about a new or updated {@code ChatServerRecord} - a necessary part of
-//     * maintaining network consistency.
-//     * </p>
-//     *
-//     * @param primaryPID the PID of the primary server issuing the update.
-//     * @param record     the {@link ChatServerRecord} to broadcast.
-//     *
-//     */
-//    public void broadcastChatServerRecord(Long primaryPID, ChatServerRecord record) {
-//        UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToReplica(primaryPID, record);
-//        broadcastServerRecord(message);
-//    }
-//
-//    /**
-//     * Generic helper method for broadcasting {@code UpdateMessage<T>} to all connected peer addressing servers.
-//     * <p>
-//     * This method handles JSON serialization and transmission errors consistently,
-//     * logging any failures without interrupting the loop.
-//     * </p>
-//     *
-//     * @param message the update message to be broadcast.
-//     * @param <T>     the type of record being broadcast (e.g., {@code AddrServerRecord}, {@code ChatServerRecord}).
-//     */
-//    private <T> void broadcastServerRecord(UpdateMessage<T> message) {
-//        try {
-//            String jsonMessage = message.toJson();
-//            for (NIOMessageChannel nioChannel : peerChannels.values()) {
-//                try {
-//                    nioChannel.sendMessage(jsonMessage);
-//                } catch (IOException ioe) {
-//                    System.err.println("Failed to send UpdateMessage<" + message.getObjectType() + ">: " + ioe.getMessage());
-//                    removeProcessCloseConnection(nioChannel.getSocketChannel());
-//                }
-//            }
-//        } catch (JsonProcessingException e) {
-//            System.err.println("Failed to serialize UpdateMessage<" + message.getObjectType() + ">: " + e.getMessage());
-//            return;
-//        }
-//    }
 
 
 }

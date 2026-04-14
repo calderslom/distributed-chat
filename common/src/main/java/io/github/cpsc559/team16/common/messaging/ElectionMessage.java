@@ -1,5 +1,8 @@
 package io.github.cpsc559.team16.common.messaging;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * A standardized election message used to create and respond to leader election events.
  *
@@ -21,13 +24,26 @@ package io.github.cpsc559.team16.common.messaging;
  */
 public class ElectionMessage extends BaseAddrServerMessage<String> {
 
+    // Jackson Constructor
+    @JsonCreator
+    public ElectionMessage(
+            @JsonProperty("messageID") long messageID,
+            @JsonProperty("msgType") String msgType,
+            @JsonProperty("objectType") String objectType,
+            @JsonProperty("senderPID") long senderPID,
+            @JsonProperty("senderRole") String senderRole,
+            @JsonProperty("targetRole") String targetRole,
+            @JsonProperty("payload") String payload) {
+        super(messageID, msgType, objectType, senderPID, senderRole, targetRole, payload);
+    }
+
     /**
      * Constructs a new election message, used to initiate a leader election.
      *
      * @param senderPID The ID of the process initiating the election.
      */
     private ElectionMessage(long senderPID, String payload) {
-        super(0, MessageTypes.ELECTION, ObjectTypes.STRING, senderPID, "", "", payload);
+        super(0, MessageTypes.ELECTION, ObjectTypes.STRING, senderPID, Roles.REPLICA, Roles.REPLICA, payload);
     }
 
     /**
@@ -37,7 +53,7 @@ public class ElectionMessage extends BaseAddrServerMessage<String> {
      * @param senderPID The ID of the process initiating the election.
      */
     private ElectionMessage(long messageID, long senderPID, String payload) {
-        super(messageID, MessageTypes.ELECTION, ObjectTypes.STRING, senderPID, "", "", payload);
+        super(messageID, MessageTypes.ELECTION, ObjectTypes.STRING, senderPID, Roles.REPLICA, Roles.REPLICA, payload);
     }
 
     /**

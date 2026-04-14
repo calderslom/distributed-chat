@@ -11,12 +11,13 @@ import java.util.List;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 import io.github.cpsc559.team16.common.utilities.BaseMessage;
 import io.github.cpsc559.team16.common.utilities.ChatLog;
 import io.github.cpsc559.team16.common.utilities.ChatLogUpdate;
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
 import io.github.cpsc559.team16.common.utilities.ServerServerMessage;
-
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 /**
  * Handles incoming messages specifically for interactions between server
  * instances in the chat system.
@@ -34,15 +35,15 @@ import io.github.cpsc559.team16.common.utilities.ServerServerMessage;
  * The debug level controls the verbosity of logs throughout the server's
  * operations. Different debug levels are used for:
  * <ul>
- * <li>{@link #DEBUG_BASIC} - Logs basic events, such as startup and major
+ * <li>{@code #DEBUG_BASIC} - Logs basic events, such as startup and major
  * actions like connecting peers or sending messages.</li>
- * <li>{@link #DEBUG_NORMAL} - Logs regular operations, including received
+ * <li>{@code DEBUG_NORMAL} - Logs regular operations, including received
  * messages and actions taken.</li>
- * <li>{@link #DEBUG_DETAILED} - Logs detailed flow, like parsing messages and
+ * <li>{@code #DEBUG_DETAILED} - Logs detailed flow, like parsing messages and
  * responding to clients.</li>
- * <li>{@link #DEBUG_LOW_LEVEL} - Logs low-level operations, such as I/O
+ * <li>{@code #DEBUG_LOW_LEVEL} - Logs low-level operations, such as I/O
  * activities like reading and writing data.</li>
- * <li>{@link #DEBUG_EXTREME} - Logs everything, useful for debugging edge cases
+ * <li>{@code #DEBUG_EXTREME} - Logs everything, useful for debugging edge cases
  * and deep issues.</li>
  * </ul>
  * </p>
@@ -80,86 +81,6 @@ import io.github.cpsc559.team16.common.utilities.ServerServerMessage;
 @SuppressWarnings("unused")
 class ServerHandler implements ConnectionHandler {
 
-    /**
-     * The current debug level for controlling verbosity of server logs.
-     * <p>
-     * This is configurable at runtime using the environment variable
-     * <b>DEBUG_LEVEL</b>.
-     * If the environment variable is not set, the default level is
-     * {@code DEBUG_EXTREME} (5),
-     * meaning all debug messages will be printed.
-     * </p>
-     * <p>
-     * Example usage in shell to reduce output to basic info only:
-     * 
-     * <pre>{@code
-     * export DEBUG_LEVEL=1
-     * }</pre>
-     * </p>
-     */
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    // Debug level constants
-
-    /**
-     * Debug level: No debug output. Use in production mode where logs are minimal.
-     */
-    private static final int DEBUG_NONE = 0; // No debug output (production mode)
-
-    /**
-     * Debug level: Basic events such as startup, shutdown, and major transitions.
-     */
-    private static final int DEBUG_BASIC = 1; // Basic info: startup, shutdown, major events
-
-    /**
-     * Debug level: Normal runtime activity such as new connections or message
-     * processing.
-     */
-    private static final int DEBUG_NORMAL = 2; // Normal operation details: connections, requests
-
-    /**
-     * Debug level: Step-by-step logic, including function entry points and internal
-     * decisions.
-     */
-    private static final int DEBUG_DETAILED = 3; // Detailed flow: entering methods, decision points
-
-    /**
-     * Debug level: Low-level I/O activity like byte reads/writes and selector
-     * state.
-     */
-    private static final int DEBUG_LOW_LEVEL = 4; // Low-level operations: byte-level I/O, parsing
-
-    /**
-     * Debug level: Maximum verbosity including every possible detail.
-     * Useful for diagnosing edge cases or unexpected behavior.
-     */
-    private static final int DEBUG_EXTREME = 5; // Extreme detail: everything, for deep debugging
-
-    /**
-     * Logs a debug message to standard output if the message level is
-     * less than or equal to the configured {@link #DEBUG_LEVEL}.
-     * <p>
-     * Each message is prefixed with a tag representing its severity.
-     * This helps developers visually filter relevant messages while debugging.
-     * </p>
-     *
-     * @param level   the severity level of the message (0–5)
-     * @param message the message to log
-     */
-
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
 
     /**
      * Handles incoming messages, processes different types of commands, and updates
@@ -207,10 +128,15 @@ class ServerHandler implements ConnectionHandler {
      */
 
     public void handle(BaseMessage message, ConnectionContext ctx, SelectionKey key) {
-        if (!(message instanceof ServerServerMessage msg)) {
+        // FIX C: Universal activity reset
+        // Any valid message received on this channel proves the peer is alive.
+        ctx.lastActivityTime = System.currentTimeMillis();
+        ctx.awaitingPong = false;
+        ctx.missedPongs = 0;
 
+        if (!(message instanceof ServerServerMessage msg)) {
             if (message instanceof ClientServerMessage clientMsg) {
-                ConnectionHandler clientHandler = ChatServer.getHandler(ChatServer.ConnectionType.CLIENT);
+                ConnectionHandler clientHandler = ChatServer.getHandler(ConnectionType.CLIENT);
                 if (clientHandler != null) {
                     clientHandler.handle(clientMsg, ctx, key);
                 } else {
@@ -243,12 +169,12 @@ class ServerHandler implements ConnectionHandler {
                 if (msg.getCommand().equals("REQUEST_CHATLOG")) {
 
                     try {
-                        int senderPid = Integer.parseInt(msg.getSender());
-                        ctx.peerID = senderPid;
+                        long senderPID = Integer.parseInt(msg.getSender());
+                        ctx.peerPID = senderPID;
 
-                        if (!ChatServer.getConnectedPeers().containsKey(senderPid)) {
-                            ChatServer.getConnectedPeers().put(senderPid, ctx);
-                            debug(DEBUG_BASIC, "[PEER] Added incoming peer PID=" + senderPid + " to connectedPeers");
+                        if (!ChatServer.getConnectedPeers().containsKey(senderPID)) {
+                            ChatServer.getConnectedPeers().put(senderPID, ctx);
+                            debug(DEBUG_BASIC, "[PEER] Added incoming peer PID=" + senderPID + " to connectedPeers");
                         }
 
                     } catch (NumberFormatException e) {
@@ -262,12 +188,12 @@ class ServerHandler implements ConnectionHandler {
 
                 } else if (msg.getCommand().equals("RESPONSE_CHATLOG")) {
 
-                    int senderPid = Integer.parseInt(msg.getSender());
-                    ctx.peerID = senderPid;
+                    long senderPID = Integer.parseInt(msg.getSender());
+                    ctx.peerPID = senderPID;
 
-                    if (!ChatServer.getConnectedPeers().containsKey(senderPid)) {
-                        ChatServer.getConnectedPeers().put(senderPid, ctx);
-                        debug(DEBUG_BASIC, "[PEER] Added incoming peer PID=" + senderPid + " to connectedPeers");
+                    if (!ChatServer.getConnectedPeers().containsKey(senderPID)) {
+                        ChatServer.getConnectedPeers().put(senderPID, ctx);
+                        debug(DEBUG_BASIC, "[PEER] Added incoming peer PID=" + senderPID + " to connectedPeers");
                     }
                     mergeChatlog(msg);
                     System.out.println("merged chatlog with peer: " + msg.getSender());
@@ -275,7 +201,7 @@ class ServerHandler implements ConnectionHandler {
                 } else if (msg.getCommand().equals("PING")) {
                     debug(DEBUG_NORMAL, "Received PING from " + msg.getSender());
                     ServerServerMessage pong = new ServerServerMessage(
-                            String.valueOf(ChatServer.getID()),
+                            String.valueOf(ChatServer.getPID()),
                             msg.getSender(),
                             "PONG",
                             "");
@@ -283,9 +209,7 @@ class ServerHandler implements ConnectionHandler {
                     key.selector().wakeup();
                     return;
                 } else if (msg.getCommand().equals("PONG")) {
-                    ctx.awaitingPong = false;
-                    ctx.missedPongs = 0;
-                    ctx.lastActivityTime = System.currentTimeMillis();
+                    // Logic is now redundant due to universal reset at top, but kept for logging
                     debug(DEBUG_NORMAL, "Received PONG from " + msg.getSender());
                     return;
                 }
@@ -293,7 +217,6 @@ class ServerHandler implements ConnectionHandler {
             } catch (JsonProcessingException e) {
                 e.printStackTrace();
             }
-
         }
     }
 
@@ -431,7 +354,7 @@ class ServerHandler implements ConnectionHandler {
         }
 
         return new ServerServerMessage(
-                String.valueOf(ChatServer.getID()), // sender PID
+                String.valueOf(ChatServer.getPID()), // sender PID
                 receiverPid, // receiver PID
                 "RESPONSE_CHATLOG", // command
                 logContents.toString() // chat log as content

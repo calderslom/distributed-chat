@@ -14,12 +14,16 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import io.github.cpsc559.team16.common.dto.PrimaryAddress;
+import io.github.cpsc559.team16.common.logging.DebugLogger;
+import io.github.cpsc559.team16.common.utilities.PrimaryDiscoveryReader;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * A client implementation for an IRC-style chat application.
@@ -53,48 +57,7 @@ import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
  */
 // @SuppressWarnings("unused")
 public class Client {
-
-    /**
-     * Debug level configuration from environment variable.
-     * Defaults to 1 (BASIC) if not specified.
-     * Levels:
-     * 0 - No debug output (production mode)
-     * 1 - Basic info: startup, shutdown, major events
-     * 2 - Normal operation details: connections, requests
-     * 3 - Detailed flow: entering methods, decision points
-     * 4 - Low-level operations: byte-level I/O, parsing
-     * 5 - Extreme detail: everything, for deep debugging
-     */
-    private static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    // Debug level constants
-    public static final int DEBUG_NONE = 0; // No debug output (production mode)
-    public static final int DEBUG_BASIC = 1; // Basic info: startup, shutdown, major events
-    public static final int DEBUG_NORMAL = 2; // Normal operation details: connections, requests
-    public static final int DEBUG_DETAILED = 3; // Detailed flow: entering methods, decision points
-    public static final int DEBUG_LOW_LEVEL = 4; // Low-level operations: byte-level I/O, parsing
-    public static final int DEBUG_EXTREME = 5; // Extreme detail: everything, for deep debugging
-
-    /**
-     * Logs a debug message if the current debug level is sufficient.
-     * 
-     * @param level   The debug level of the message (0-5)
-     * @param message The message to log
-     */
-    public static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
-
+    
     // Client state
     /**
      * The username assigned to the client for display purposes in the chat
@@ -127,18 +90,63 @@ public class Client {
      * The hostname or IP address of the addressing server that facilitates the
      * initial connection to the chat server.
      */
-    private String asHostname;
-    public String getAsHostname() {
-        return asHostname;
+    private volatile String primaryHostAddress;
+    public String getPrimaryHostAddress() {
+        return primaryHostAddress;
     }
 
     /**
      * The port number of the addressing server used for connecting and retrieving
      * chat server information.
      */
-    private int asPort;
+    private volatile int asPort;
     public int getAsPort() {
         return asPort;
+    }
+
+    /**
+     * Re-reads the shared discovery file to update the current known Primary.
+     * Sets static variables PRIMARY host address and port for client connections.
+     *
+     * @return A {@link PrimaryAddress} if the shared file was found and its details were loaded; null otherwise.
+     */
+    public PrimaryAddress retrievePrimaryDetails() {
+        try {
+            PrimaryAddress details = PrimaryDiscoveryReader.readPrimaryDetails();
+            if (details != null) {
+                this.primaryHostAddress = details.hostAddress();
+                this.asPort = details.clientPort();
+                return details;
+            }
+        } catch (IOException e) {
+            System.err.println("Config: Error reading primary addressing server discovery file: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * Re-reads the shared discovery file to update the current known Primary.
+     * Sets instance variables for PRIMARY host address and port for client connections.
+     *
+     * @return true if a Primary was found and its details were loaded, false otherwise.
+     */
+    public boolean refreshPrimaryDetails() {
+        try {
+            PrimaryAddress details = PrimaryDiscoveryReader.readPrimaryDetails();
+            if (details != null) {
+                this.primaryHostAddress = details.hostAddress();
+                this.asPort = details.clientPort();
+                return true;
+            }
+        } catch (IOException e) {
+            System.err.println("Config: Error reading primary addressing server discovery file: " + e.getMessage());
+        }
+
+        // If we reach here, no primary was found. Clear old stale data.
+        this.primaryHostAddress = null;
+        this.asPort = -1;
+        return false;
     }
 
     // Chat server connection
@@ -354,10 +362,6 @@ public class Client {
      * 
      * @param username   The display name for this client. This will be used as the
      *                   sender's identifier in the chat system.
-     * @param serverName The hostname or IP address of the addressing server.
-     *                   This server is responsible for directing the client to the
-     *                   appropriate chat server.
-     * @param serverPort The port number on which the addressing server is running.
      * @param terminal   The terminal interface instance to be used for rendering
      *                   the
      *                   command-line interface. It enables interactive
@@ -368,16 +372,17 @@ public class Client {
      *                   with the
      *                   chat client.
      */
-    public Client(String username, String serverName, int serverPort, Terminal terminal, LineReader lineReader) {
+    public Client(String username, Terminal terminal, LineReader lineReader) {
         debug(DEBUG_BASIC, "Initializing client for user: " + username);
         this.username = username;
-        this.asHostname = serverName;
-        this.asPort = serverPort;
         this.terminal = terminal;
         this.lineReader = lineReader;
         this.connectionManager = new ConnectionManager(this);
         this.messageUtils = new MessageUtils(this);
     }
+
+
+
 
     /**
      * Starts the client application. This method performs the following steps:
@@ -416,13 +421,40 @@ public class Client {
      *                              connection.
      */
     public void run() {
-        debug(DEBUG_BASIC, "Starting client...");
+        debug(DEBUG_BASIC, "Starting main execution loop...");
         terminate = false;
 
+        // Stage 1: Discovery Phase
+        int discoveryAttempts = 1;
+        while (!terminate && !refreshPrimaryDetails()) {
+            discoveryAttempts++;
+
+            // Developer output
+            debug(DEBUG_NORMAL, "Resolving PRIMARY addressing server network configuration... Attempt " + discoveryAttempts);
+            // User output
+            if (DebugLogger.getDebugLevel() < DEBUG_BASIC) {
+                System.out.print("\r[STATUS] Network discovery... (Attempt " + discoveryAttempts + ") [Ctrl+C to Quit]");
+            }
+
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                terminate = true;
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (terminate) {
+            System.out.println("\n[SYSTEM] Discovery cancelled. Shutting down...");
+            return;
+        }
+        System.out.println();
+        debug(DEBUG_BASIC, "Found PRIMARY Addressing Server at " + primaryHostAddress + ":" + asPort);
+
+        // Stage 2: Connection Phase
         try {
             connectionManager.connect();
             // Initialize and start worker threads
-            debug(DEBUG_DETAILED, "Creating client threads");
+            debug(DEBUG_DETAILED, "Creating client threads...");
             inputThread = new InputThread(this, lineReader);
             outputThread = new OutputThread(this, lineReader);
             senderThread = new SenderThread(this);
@@ -433,7 +465,7 @@ public class Client {
             senderThread.start();
             receiverThread.start();
 
-            debug(DEBUG_BASIC, "Client threads started successfully");
+            debug(DEBUG_DETAILED, "Client threads started successfully.");
 
             // Main application loop
             while (!terminate) {
@@ -561,17 +593,27 @@ public class Client {
         // Signal shutdown to all threads
         shutdownThreads();
 
+        // Close the socket so that the receiver thread is interrupted.
         try {
+            if (chatServer != null && !chatServer.isClosed()) {
+                chatServer.close();
+                chatServer = null;
+                debug(DEBUG_DETAILED, "Socket closed to unblock receiver");
+            }
+        } catch (IOException e) {
+            debug(DEBUG_DETAILED, "Error closing socket: " + e.getMessage());
+        }
+
+        try {
+            if (lineReader != null) {
+                lineReader.getTerminal().close();
+            }
+
             // Wait for all threads to complete (with timeout)
             if (!shutdownLatch.await(5, TimeUnit.SECONDS)) {
                 debug(DEBUG_NORMAL, "Shutdown timeout - forcing exit");
             }
 
-            // Clean up resources
-            if (chatServer != null) {
-                chatServer.close();
-                chatServer = null;
-            }
             if (in != null) {
                 in.close();
                 in = null;
@@ -580,17 +622,15 @@ public class Client {
                 out.close();
                 out = null;
             }
-            if (lineReader != null) {
-                lineReader.getTerminal().close();
-            }
             debug(DEBUG_NORMAL, "All resources closed");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             debug(DEBUG_NORMAL, "Shutdown interrupted");
         } catch (IOException e) {
-            debug(DEBUG_NORMAL, "Error during shutdown: " + e.getMessage());
+            debug(DEBUG_NORMAL, "Cleanup error: " + e.getMessage());
         }
     }
+
 
     /**
      * Main entry point for the client application.
@@ -608,7 +648,7 @@ public class Client {
      * to "localhost").</li>
      * <li>SERVER_PORT: Specifies the port of the addressing server (defaults to
      * 49800).</li>
-     * <li>DEBUG_LEVEL: Specifies the level of debug output (0-5, defaults to
+     * <li>CLIENT_DEBUG_LEVEL: Specifies the level of debug output (0-5, defaults to
      * 0).</li>
      * </ul>
      * </li>
@@ -633,7 +673,10 @@ public class Client {
      * @param args Command line arguments (not used in this implementation).
      */
     public static void main(String[] args) {
-        Client.debug(Client.DEBUG_BASIC, "Starting client application");
+        String debugEnv = System.getenv().getOrDefault("CLIENT_DEBUG_LEVEL", "0");
+        int debugLevel = Integer.parseInt(debugEnv);
+        setDebugLevel(debugLevel);
+        debug(DEBUG_BASIC, "DEBUG SYSTEM INITIALIZED TO LEVEL: " + debugLevel);
 
         // Initialize terminal for username input
         Terminal terminal = null;
@@ -643,8 +686,20 @@ public class Client {
             terminal = TerminalBuilder.builder().system(true).build();
             lineReader = LineReaderBuilder.builder().terminal(terminal).build();
 
-            // Prompt the user for a username
-            System.out.print("Enter your username: ");
+            // Print splash and prompt the user for their username
+            System.out.println("================================================================");
+            System.out.println("  DISTRIBUTED CHAT SYSTEM v1.0.4 - [Client Node]                ");
+            System.out.println("================================================================");
+
+            try {
+                System.out.print("Initializing Chat Client...");
+                Thread.sleep(400);
+                System.out.println(" DONE");
+
+                System.out.print("\nPlease enter your username: ");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
             username = lineReader.readLine().trim();
 
             // If no username is provided, fall back to "Anonymous"
@@ -655,17 +710,16 @@ public class Client {
             terminal.writer().print("\033[H\033[2J");
             terminal.writer().flush();
         } catch (Exception e) {
-            Client.debug(Client.DEBUG_BASIC, "Error reading username, using default: Anonymous");
+            debug(DEBUG_BASIC, "Error reading username, using default: Anonymous");
         }
-        // Read the server configuration from environment variables
-        String serverAddress = System.getenv().getOrDefault("ADDRESS_SERVER_IP", "localhost");
-        int serverPort = Integer.parseInt(System.getenv().getOrDefault("SERVER_PORT", "49800"));
 
-        Client.debug(Client.DEBUG_NORMAL, String.format("Client configuration - Username: %s, Server: %s:%d",
-                username, serverAddress, serverPort));
+        debug(DEBUG_NORMAL, String.format("Client configuration - Username: %s", username));
 
         // Instantiate and run the client with the provided configuration
-        Client client = new Client(username, serverAddress, serverPort, terminal, lineReader);
+        Client client = new Client(username, terminal, lineReader);
         client.run();
     }
+
+
+
 }

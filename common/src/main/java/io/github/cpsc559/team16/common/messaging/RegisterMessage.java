@@ -1,5 +1,7 @@
 package io.github.cpsc559.team16.common.messaging;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ServerRole;
@@ -17,6 +19,19 @@ public class RegisterMessage<T> extends BaseAddrServerMessage<T> {
 
     // Processes receive a PID upon registration with the PRIMARY {@code AddressingServer}
     private static final long DEFAULT_PID = 0L;
+
+    // Jackson Constructor
+    @JsonCreator
+    public RegisterMessage(
+            @JsonProperty("messageID") long messageID,
+            @JsonProperty("msgType") String msgType,
+            @JsonProperty("objectType") String objectType,
+            @JsonProperty("senderPID") long senderPID,
+            @JsonProperty("senderRole") String senderRole,
+            @JsonProperty("targetRole") String targetRole,
+            @JsonProperty("payload") T payload) {
+        super(messageID, msgType, objectType, senderPID, senderRole, targetRole, payload);
+    }
 
     /**
      * Constructs an "REGISTER" message.
@@ -86,35 +101,15 @@ public class RegisterMessage<T> extends BaseAddrServerMessage<T> {
      *
      * @param clientPort       The port used for client communication.
      * @param peerPort         The port used for peer-to-peer chat server communication.
-     * @param addrServerPort   The port used to connect to the AddressingServer.
      * @param maxClientCount   The server's maximum client capacity.
      * @return A {@code RegisterMessage} containing a {@code ChatServerRecord} payload.
      */
-    public static RegisterMessage<ChatServerRecord> fromChatServer(String hostAddress, int clientPort, int peerPort, int addrServerPort,
+    public static RegisterMessage<ChatServerRecord> fromChatServer(String hostAddress, int clientPort, int peerPort,
                                                                    int maxClientCount) {
         ChatServerRecord record = new ChatServerRecord(
-                DEFAULT_PID, hostAddress, clientPort, peerPort, addrServerPort, maxClientCount);
+                DEFAULT_PID, hostAddress, clientPort, peerPort, maxClientCount);
         return new RegisterMessage<>(ObjectTypes.CHAT_SERVER_RECORD, Roles.CHATSERVER, Roles.PRIMARY, record);
     }
-
-    /**
-     * Factory method for registering a ChatServer with the HostAddress declared.
-     *
-     * @param hostAddress      The network (IP) address of the address server.
-     * @param clientPort       The port used for client communication.
-     * @param peerPort         The port used for peer-to-peer chat server communication.
-     * @param addrServerPort   The port used to connect to the AddressingServer.
-     * @param maxClientCount   The server's maximum client capacity.
-     * @return A {@code RegisterMessage} containing a {@code ChatServerRecord} payload.
-     */
-    public static RegisterMessage<ChatServerRecord> fromChatServerWithAddress(String hostAddress, int clientPort, int peerPort, int addrServerPort,
-                                                                   int maxClientCount) {
-        ChatServerRecord record = new ChatServerRecord(
-                DEFAULT_PID, hostAddress, clientPort, peerPort, addrServerPort, maxClientCount);
-        return new RegisterMessage<>(ObjectTypes.CHAT_SERVER_RECORD, Roles.CHATSERVER, Roles.PRIMARY, record);
-    }
-
-
 
     /**
      * Factory method for registering an AddressingServer replica.
@@ -124,11 +119,28 @@ public class RegisterMessage<T> extends BaseAddrServerMessage<T> {
      * @param chatServerPort   Port used to receive chat server registrations.
      * @return A {@code RegisterMessage} containing an {@code AddrServerRecord} payload.
      */
-    public static RegisterMessage<AddrServerRecord> fromReplica(String hostAddress, int clientPort, int peerPort, int chatServerPort) {
+    public static RegisterMessage<AddrServerRecord> fromReplica(long messageID, String hostAddress, int clientPort, int peerPort, int chatServerPort) {
         AddrServerRecord record = new AddrServerRecord(
                 DEFAULT_PID, hostAddress, clientPort, peerPort, chatServerPort, ServerRole.REPLICA);
-        return new RegisterMessage<>(ObjectTypes.ADDR_SERVER_RECORD, Roles.REPLICA, Roles.PRIMARY, record);
+        return new RegisterMessage<>(messageID, ObjectTypes.ADDR_SERVER_RECORD, Roles.REPLICA, Roles.PRIMARY, record);
     }
+
+    /**
+     * Factory method for registering a ChatServer with the HostAddress declared.
+     *
+     * @param hostAddress      The network (IP) address of the address server.
+     * @param clientPort       The port used for client communication.
+     * @param peerPort         The port used for peer-to-peer chat server communication.
+     * @param maxClientCount   The server's maximum client capacity.
+     * @return A {@code RegisterMessage} containing a {@code ChatServerRecord} payload.
+     */
+    public static RegisterMessage<ChatServerRecord> fromChatServerWithAddress(String hostAddress, int clientPort, int peerPort,
+                                                                   int maxClientCount) {
+        ChatServerRecord record = new ChatServerRecord(
+                DEFAULT_PID, hostAddress, clientPort, peerPort, maxClientCount);
+        return new RegisterMessage<>(ObjectTypes.CHAT_SERVER_RECORD, Roles.CHATSERVER, Roles.PRIMARY, record);
+    }
+
 
     /**
      * Factory method for registering an AddressingServer replica with the HostAddress declared.

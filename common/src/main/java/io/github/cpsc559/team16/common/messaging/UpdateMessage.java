@@ -1,5 +1,7 @@
 package io.github.cpsc559.team16.common.messaging;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
 
@@ -13,6 +15,19 @@ import io.github.cpsc559.team16.common.dto.ChatServerRecord;
  * @param <T> The type of data being sent as the payload (e.g., {@code ChatServerRecord}, {@code AddrServerRecord}).
  */
 public class UpdateMessage<T> extends BaseAddrServerMessage<T> {
+
+    // Jackson Constructor
+    @JsonCreator
+    public UpdateMessage(
+            @JsonProperty("messageID") long messageID,
+            @JsonProperty("msgType") String msgType,
+            @JsonProperty("objectType") String objectType,
+            @JsonProperty("senderPID") long senderPID,
+            @JsonProperty("senderRole") String senderRole,
+            @JsonProperty("targetRole") String targetRole,
+            @JsonProperty("payload") T payload) {
+        super(messageID, msgType, objectType, senderPID, senderRole, targetRole, payload);
+    }
 
     /**
      * Constructs an "UPDATE" message.

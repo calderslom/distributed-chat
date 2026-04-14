@@ -8,48 +8,48 @@ package io.github.cpsc559.team16.addressingserver;
 *
 */
 
-public class ElectionHelper {
 
-    private AddressingServer server;
+import io.github.cpsc559.team16.common.dto.ServerRole;
+import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 
-    public ElectionHelper(AddressingServer server) {
+import java.io.IOException;
 
-    }
-
-    /**
-     * Computes the next available PID by scanning both registries.
-     * Called during promotion to PRIMARY.
-     *
-     * @return the next safe PID to assign.
-     */
-    public long computeNextPID() {
-        long maxChatPID = server.getChatServerRegistry().getRecords().keySet().stream()
-                .mapToLong(Long::longValue)
-                .max()
-                .orElse(0L);
-
-        long maxAddrPID = server.getAddrServerRegistry().getRecords().keySet().stream()
-                .mapToLong(Long::longValue)
-                .max()
-                .orElse(0L);
-
-        return Math.max(maxChatPID, maxAddrPID) + 1;
-    }
+public final class ElectionHelper {
 
     /**
      * Handles full promotion steps for a replica becoming the new Primary.
      * @param server the AddressingServer instance being promoted.
      */
-    public void promote(AddressingServer server) {
-        System.out.println("Promoting this REPLICA to PRIMARY...");
-        server.getConfig().setRole(io.github.cpsc559.team16.common.dto.ServerRole.PRIMARY);
+    public static void promoteSelf(AddressingServer server) {
+        System.out.println("This addressing server has been promoted from REPLICA to PRIMARY...");
+        // Shut down the ping manager (only REPLICA's ping their peers)
+        server.getPingManager().shutdown();
+        // Set internal PID generator to ensure no active processes have their PID re-assigned.
+        server.setPidCounterToNetworkMax();
+        // Update config to reflect new PRIMARY status
+        AddrServerConfig config = server.getConfig();
+        config.setRole(ServerRole.PRIMARY);
+        // Update the internal registry to reflect the new leadership status
+        AddrServerRecord myRecord = server.getAddrServerRegistry().getRecords().get(config.getPID());
+        if (myRecord != null) {
+            myRecord.setRole(ServerRole.PRIMARY);
+        }
 
-        long nextPID = computeNextPID();
-        server.setPidCounter(nextPID);
-        System.out.printf("Set PID counter to %d%n", nextPID);
+        // Update connection details for the primary addressing server.
+        server.getConfig().setPrimaryReplicaPort(server.getConfig().getReplicaPort());
+        server.getConfig().setPrimaryHostAddress(server.getConfig().getHostAddress());
+        // Since we don't have a DNS, the new Primary writes its info to the shared volume NOW.
+        try {
+            PrimaryDiscoveryManager discovery = server.getDiscoveryManager();
+            discovery.publish();
+        } catch (IllegalStateException ise) {
+            System.err.println("REPLICA attempted to publish host details before promotion: " + ise.getMessage());
+        } catch(IOException ioe) {
+            System.err.println("New PRIMARY could not publish discovery file: " + ioe.getMessage());
+        }
 
-        // We can extend this method later to do:
-        // - broadcast UPDATE message "All your base are belong to us"
-
+        System.out.println("Promotion Complete. Now serving as PRIMARY.");
     }
+
+
 }

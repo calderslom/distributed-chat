@@ -7,6 +7,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ServerRole;
+import io.github.cpsc559.team16.common.logging.ServerDebugLogger;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 public class AddrServerRegistry {
 
@@ -54,7 +56,7 @@ public class AddrServerRegistry {
      */
     public void putAddrServerRecord(Long id, AddrServerRecord record) {
         addrServerRecords.put(id, record);
-        debugPrintServer(record);
+        ServerDebugLogger.printAddrServerAction("Inserting", record);
     }
 
     /**
@@ -71,14 +73,49 @@ public class AddrServerRegistry {
         }
         AddrServerRecord existing = addrServerRecords.get(id);
         if (existing != null) {
-            debugPrintUpdateServerPID(record);
+            ServerDebugLogger.printAddrServerAction("Updating", record);
         } else {
-            debugPrintInsertServerPID(record);
+            ServerDebugLogger.printAddrServerAction("Inserting", record);
         }
         addrServerRecords.put(id, record);
-        debugPrintServer(record);
     }
 
+    /**
+     * Validates an incoming {@link AddrServerRecord} against the local registry to ensure consistency.
+     * <p>
+     * This method is a critical security and integrity check used during the
+     * {@code SYNCHRONIZE} handshake. It verifies that the process claiming a specific PID
+     * matches a record stored in this registry across all functional fields:
+     * <ul>
+     * <li><b>Identity:</b> The Process ID (PID).</li>
+     * <li><b>Role:</b> The {@link ServerRole} (PRIMARY/REPLICA).</li>
+     * <li><b>Topology:</b> The Host Address and all three communication ports (Client, Peer, Chat).</li>
+     * </ul>
+     * </p>
+     * <p>
+     * This record is the single source of truth - If any field mismatches,
+     * it indicates a state conflict (e.g. a process attempting to
+     * spoof an identity, a split-brain scenario, or a stale registry record).
+     * </p>
+     *
+     * @param externalRecord the record provided by the connecting AddressingServer process.
+     * @return {@code true} if the external record perfectly matches the registry's state;
+     * {@code false} if no record exists for that PID or if a field mismatch is detected.
+     */
+    public boolean validateReplicaIdentity(AddrServerRecord externalRecord) {
+        AddrServerRecord registryRecord = this.getRecords().get(externalRecord.getPID());
+
+        if (registryRecord == null) {
+            return false;
+        }
+
+        return externalRecord.getPID().equals(registryRecord.getPID()) &&
+                externalRecord.getHostAddress().equals(registryRecord.getHostAddress()) &&
+                externalRecord.getClientPort() == registryRecord.getClientPort() &&
+                externalRecord.getPeerPort() == registryRecord.getPeerPort() &&
+                externalRecord.getChatServerPort() == registryRecord.getChatServerPort() &&
+                externalRecord.getRole().equals(registryRecord.getRole());
+    }
 
     /**
      * Removes an {@link AddrServerRecord} from the registry using the provided process ID (PID).
@@ -89,22 +126,45 @@ public class AddrServerRegistry {
      * </p>
      *
      * @param pid the unique process ID of the AddressingServer to remove from the registry.
+     * @return true if a record corresponding to the PID was actually found and removed; false otherwise.
+     *
      */
-    public void removeRecordByKey(Long pid) {
+    public boolean removeRecordByKey(Long pid) {
         AddrServerRecord record = addrServerRecords.remove(pid);
         if (record != null) {
-            System.out.printf("Successfully removed *AddrServerRecord* for Network Process with PID: %d - and Host Address: %s%n", pid, record.getHostAddress());
+            System.out.printf("Successfully removed *AddrServerRecord* for Network Process with PID: %d%n", pid);
+            if (record.getRole() == ServerRole.PRIMARY) {
+                LeaderElectionManager mgr = server.getLeaderElectionManager();
+                System.out.print("WARNING: The removed server was the PRIMARY AddressingServer; ");
+                if (mgr.isMidElection()) {
+                    System.out.println("an election is underway.");
+                } else {
+                    mgr.initiateElection();
+                    System.out.println("initiating an election.");
+                }
+
+            } else {
+                System.out.println("The removed server was a REPLICA AddressingServer.");
+            }
+            return true;
         } else {
             System.out.println("No AddrServerRecord found for PID: " + pid + " — nothing to remove.");
+            return false;
         }
+    }
 
-        System.out.println("checking role of removed server.");
-
-        if (record.getRole() == ServerRole.PRIMARY) {
-            System.out.println("WARNING: The removed server was the PRIMARY AddressingServer. A new primary should be elected.");
-            server.getLeaderElectionManager().initiateElection();
-        } else {
-            System.out.println("The removed server was a REPLICA AddressingServer.");
+    /**
+     * Compares the local registry keys against a set of active PIDs and
+     * removes any records that are no longer present in the network.
+     *
+     * @param activePids The set of PIDs currently recognized by the Primary.
+     */
+    public void purgeStaleRecords(Set<Long> activePids) {
+        int initialSize = addrServerRecords.size();
+        addrServerRecords.keySet().removeIf(pid -> !activePids.contains(pid));
+        int removedRecordCount = initialSize - addrServerRecords.size();
+        if (removedRecordCount  > 0) {
+            debug(DEBUG_NORMAL, "Purged " + removedRecordCount  + " stale Addressing Server records from the peer registry.");
         }
     }
 
@@ -190,40 +250,54 @@ public class AddrServerRegistry {
         return null;
     }
 
+//    /**
+//     * Logs the details of this AddrServerRecord object to the console for debugging purposes.
+//     */
+//    public void debugPrintServer(AddrServerRecord s) {
+//        System.out.println("---------- AddrServerRecord Record -----------");
+//        System.out.printf("Network PID : %s%n", s.getPID());
+//        System.out.printf("Host Address : %s%n", s.getHostAddress());
+//        System.out.printf("Client Port  : %d%n", s.getClientPort());
+//        System.out.printf("Peer Port    : %d%n", s.getPeerPort());
+//        System.out.printf("ChatServer Port : %d%n", s.getChatServerPort());
+//        System.out.printf("Role : %s%n", s.getRole());
+//        System.out.println("---------------------------------------------------");
+//    }
+
+//    public void debugPrintAllServers() {
+//        System.out.println("|------------- Currently Registered AddressingServer's -------------|");
+//        for (AddrServerRecord s : this.addrServerRecords.values()) {
+//            debugPrintServer(s);
+//        }
+//        System.out.println("|--------------------------------------------------------------------|");
+//    }
+
+
     /**
-     * Logs the details of this AddrServerRecord object to the console for debugging purposes.
+     * Triggers a detailed diagnostic print of all currently registered Addressing Servers.
+     * <p>
+     * This method extracts the underlying {@link AddrServerRecord} collection and
+     * delegates the formatting and I/O operations to the {@link ServerDebugLogger}.
+     * Use this primarily for verifying network topology and role assignments (Primary/Backup)
+     * during failover events.
+     * </p>
      */
-    public void debugPrintServer(AddrServerRecord s) {
-        System.out.println("---------- AddrServerRecord Record -----------");
-        System.out.printf("Network PID : %s%n", s.getPID());
-        System.out.printf("Host Address : %s%n", s.getHostAddress());
-        System.out.printf("Client Port  : %d%n", s.getClientPort());
-        System.out.printf("Peer Port    : %d%n", s.getPeerPort());
-        System.out.printf("ChatServer Port : %d%n", s.getChatServerPort());
-        System.out.printf("Role : %s%n", s.getRole());
-        System.out.println("---------------------------------------------------");
-    }
-
     public void debugPrintAllServers() {
-        System.out.println("|------------- Currently Registered AddressingServer's -------------|");
-        for (AddrServerRecord s : this.addrServerRecords.values()) {
-            debugPrintServer(s);
-        }
-        System.out.println("|--------------------------------------------------------------------|");
+        ServerDebugLogger.printAllAddrServers(this.getRecords().values());
     }
 
-    public void debugPrintInsertServerPID(AddrServerRecord s) {
-        System.out.println("\t------ Inserting AddrServer Record -------");
-        System.out.printf("\tProcess ID : %s%n", s.getPID());
-        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
-        System.out.println("\t------------------------------------------");
-    }
-
-    public void debugPrintUpdateServerPID(AddrServerRecord s) {
-        System.out.println("\t------ Updating AddrServer Record -------");
-        System.out.printf("\tProcess ID : %s%n", s.getPID());
-        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
-        System.out.println("\t------------------------------------------");
-    }
+//    public void debugPrintInsertServerPID(AddrServerRecord s) {
+//        System.out.println("\t------ Inserting AddrServer Record -------");
+//        System.out.printf("\tProcess ID : %s%n", s.getPID());
+//        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
+//        System.out.println("\t------------------------------------------");
+//    }
+//
+//    public void debugPrintUpdateServerPID(AddrServerRecord s) {
+//        System.out.println("\t------ Updating AddrServer Record -------");
+//        System.out.printf("\tProcess ID : %s%n", s.getPID());
+//        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
+//        System.out.println("\t------------------------------------------");
+//    }
 
 }

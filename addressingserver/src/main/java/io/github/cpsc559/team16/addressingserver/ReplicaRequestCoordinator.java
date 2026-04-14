@@ -12,7 +12,7 @@ import java.util.function.Supplier;
  * <p>
  * It operates independently from the main event loop, and handles retrying until a valid connection
  * to the primary is established. Once connected, it uses a {@link ReplicaRequestManager} to issue
- * structured requests for system state updates (e.g., {@link io.github.cpsc559.team16.common.dto.ChatServerRecord}s,
+ * structured requests for system state updates (e.g. {@link io.github.cpsc559.team16.common.dto.ChatServerRecord}s,
  * {@link io.github.cpsc559.team16.common.dto.AddrServerRecord}s).
  * </p>
  * <p>
@@ -24,7 +24,7 @@ public class ReplicaRequestCoordinator extends Thread {
     /** Manager used to initiate sync requests to the primary AddressingServer. */
     private ReplicaRequestManager requestManager = null;
 
-    /** A callback used to register the ReplicaRequestManager externally (e.g., in the AddressingServer). */
+    /** A callback used to register the ReplicaRequestManager externally (e.g. in the AddressingServer). */
     private final Consumer<ReplicaRequestManager> onReady;
 
     /** This is set externally once registration is complete. */
@@ -36,10 +36,9 @@ public class ReplicaRequestCoordinator extends Thread {
     /** Flag to indicate if this thread should continue running. */
     private volatile boolean running = true;
 
+    /** A functional supplier that retrieves the current channel to the PRIMARY addressing server. */
     private final Supplier<NIOMessageChannel> primaryChannelSupplier;
 
-    /** The network PID of the process that instantiated this thread */
-    private final Long replicaPID;
 
     /**
      * Constructs a new {@code ReplicaRequestCoordinator} thread responsible for managing
@@ -57,12 +56,11 @@ public class ReplicaRequestCoordinator extends Thread {
      * @param onReady                  a {@code Consumer} callback used to expose the instantiated {@link ReplicaRequestManager}
      * @param primaryChannelSupplier   a {@code Supplier} that provides the active {@link NIOMessageChannel} connected to the PRIMARY
      */
-    public ReplicaRequestCoordinator(MessageIDGenerator messageIDGenerator, Long replicaPID,
+    public ReplicaRequestCoordinator(MessageIDGenerator messageIDGenerator,
                                      Consumer<ReplicaRequestManager> onReady,
                                      Supplier<NIOMessageChannel> primaryChannelSupplier) {
         super("ReplicaRequestCoordinator");
         this.messageIDGenerator = messageIDGenerator;
-        this.replicaPID = replicaPID;
         this.primaryChannelSupplier = primaryChannelSupplier;
         this.onReady = onReady;
         this.setDaemon(true);
@@ -74,7 +72,9 @@ public class ReplicaRequestCoordinator extends Thread {
      */
     public void shutdown() {
         this.running = false;
+        this.interrupt(); // Wake up a sleeping thread so it can shutdown immediately.
     }
+
 
     /**
      * The main loop for the {@code ReplicaRequestCoordinator}.
@@ -86,36 +86,22 @@ public class ReplicaRequestCoordinator extends Thread {
      */
     @Override
     public void run() {
-        while (running && requestManager == null) {
-            NIOMessageChannel primaryChannel = primaryChannelSupplier.get();
-            if (primaryChannel != null) {
-                this.requestManager = new ReplicaRequestManager(messageIDGenerator, primaryChannel);
-                this.onReady.accept(requestManager);
-                break;
-            }
-            try {
-                Thread.sleep(1000); // Try again shortly
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return; // Exit cleanly
-            }
-        }
-
+        this.requestManager = new ReplicaRequestManager(messageIDGenerator, primaryChannelSupplier);
+        this.onReady.accept(requestManager);
 
         while (running) {
             try {
-                if (requestManager.incrementSyncCounter()) {        // Update all records (Chat and Addr) every 6 cycles
-                    requestManager.requestAllServerRecords(this.replicaPID);
+                if (requestManager.incrementSyncCounter()) {
+                    requestManager.requestAllAddrServerPids();
+                    requestManager.requestAllServerRecords();
+                } else {
+                    requestManager.requestAllChatServerPids();
+                    requestManager.requestAllChatServerRecords();
                 }
-                else { requestManager.requestAllChatServerRecords(this.replicaPID);} // update only chat server records every cycle
-
-                Thread.sleep(20000); // ~1 request every 20 seconds (can be adjusted)
+                Thread.sleep(20000);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
-                System.err.println("ReplicaRequestCoordinator encountered an error: " + e.getMessage());
-                e.printStackTrace();
             }
         }
     }

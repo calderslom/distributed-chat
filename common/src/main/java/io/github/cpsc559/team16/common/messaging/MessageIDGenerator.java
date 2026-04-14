@@ -1,20 +1,25 @@
 package io.github.cpsc559.team16.common.messaging;
 
+import java.util.function.Supplier;
+
 public class MessageIDGenerator {
-    private long pid;
+
+    /** A functional supplier that fetches the latest PID from the server configuration. */
+    private final Supplier<Long> pidSupplier;
     private long lastTimestamp = -1;
     private int sequence = 0;
 
-    public MessageIDGenerator() {
-        this.pid = 0;
+    public MessageIDGenerator(Supplier<Long> pidSupplier) {
+        this.pidSupplier = pidSupplier;
     }
 
-    public void setPID(long pid) {
-        if (pid < 0 || pid > 0xFFFFL) throw new IllegalArgumentException("PID out of range");
-        this.pid = pid;
+    public long getPID() {
+        return pidSupplier.get();
     }
+
 
     public synchronized long nextID() {
+        long currentPID = pidSupplier.get();
         long currentTime = System.currentTimeMillis() & 0xFFFFFFFFFFL; // 40 bits
 
         if (currentTime == lastTimestamp) {
@@ -30,7 +35,7 @@ public class MessageIDGenerator {
             lastTimestamp = currentTime;
         }
 
-        return (pid << 48) | (currentTime << 8) | sequence;
+        return (currentPID << 48) | (currentTime << 8) | sequence;
     }
 
     public static long extractPid(long id) {

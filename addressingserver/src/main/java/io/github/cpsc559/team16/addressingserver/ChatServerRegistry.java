@@ -1,9 +1,13 @@
 package io.github.cpsc559.team16.addressingserver;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
+import io.github.cpsc559.team16.common.logging.ServerDebugLogger;
+
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 public class ChatServerRegistry {
 
@@ -51,17 +55,16 @@ public class ChatServerRegistry {
     public void updateOrInsertRecord(ChatServerRecord record) {
         Long id = record.getPID();
         if (id == null) {
-            System.err.println("AddrServerRecord has a null PID. Cannot update or insert record.");
+            System.err.println("ChatServerRecord has a null PID. Cannot update or insert record.");
             return;
         }
         ChatServerRecord existing = chatServerRecords.get(id);
         if (existing != null) {
-            debugPrintUpdateServerPID(record);
+            ServerDebugLogger.printChatServerAction("Updating", record);
         } else {
-            debugPrintInsertServerPID(record);
+            ServerDebugLogger.printChatServerAction("Inserting", record);
         }
         chatServerRecords.put(id, record);
-        debugPrintServer(record);
     }
 
 
@@ -76,15 +79,69 @@ public class ChatServerRegistry {
      *
      * @param pid the unique process ID of the chat server to remove from the registry.
      */
-    public void removeRecordByKey(Long pid) {
+    public boolean removeRecordByKey(Long pid) {
         ChatServerRecord record = chatServerRecords.remove(pid);
         if (record != null) {
-            System.out.printf("Successfully removed *ChatServerRecord* for Network Process with PID: %d - and Host Address: %s%n", pid, record.getHostAddress());
+            System.out.printf("Successfully removed *ChatServerRecord* for Network Process with PID: %d%n", pid);
+            return true;
         } else {
-            System.out.println("No ChatServerRecord found for PID: " + pid + " — nothing to remove.");
+            System.out.printf("No ChatServerRecord found for PID %d — nothing to remove.%n", pid);
+            return false;
         }
     }
 
+    /**
+     * Compares the local registry keys against a set of active PIDs and
+     * removes any records that are no longer present in the network.
+     *
+     * @param activePids The set of PIDs currently recognized by the Primary.
+     */
+    public void purgeStaleRecords(Set<Long> activePids) {
+        int initialSize = chatServerRecords.size();
+        chatServerRecords.keySet().removeIf(pid -> !activePids.contains(pid));
+        int removedRecordCount = initialSize - chatServerRecords.size();
+        if (removedRecordCount  > 0) {
+            debug(DEBUG_NORMAL, "Purged " + removedRecordCount  + " stale ChatServer records from the internal registry.");
+        }
+    }
+
+    /**
+     * Validates an incoming {@link ChatServerRecord} against the local registry to ensure consistency.
+     * <p>
+     * This method is a critical security and integrity check used during the
+     * {@code SYNCHRONIZE} handshake. It verifies that the process claiming a specific PID
+     * matches a record stored in this registry across all functional fields:
+     * <ul>
+     * <li><b>Identity:</b> The Process ID (PID).</li>
+     * <li><b>Capacity:</b> The Maximum Client limit.</li>
+     * <li><b>Topology:</b> The Host Address and all relevant communication ports (Client, Peer, Addressing).</li>
+     * </ul>
+     * </p>
+     * <p>
+     * This record is the single source of truth - If any field mismatches,
+     * it indicates a state conflict (e.g. a process attempting to
+     * spoof an identity, a split-brain scenario, or a stale registry record).
+     * </p>
+     *
+     * @param externalRecord the record provided by the connecting ChatServer process.
+     * @return {@code true} if the external record perfectly matches the registry's state;
+     * {@code false} if no record exists for that PID or if a field mismatch is detected.
+     */
+    public boolean validateChatServerIdentity(ChatServerRecord externalRecord) {
+        ChatServerRecord registryRecord = this.getRecords().get(externalRecord.getPID());
+
+        // Check if the PID exists in our registry at all
+        if (registryRecord == null) {
+            return false;
+        }
+
+        // Perform a deep equality check on all critical identity and topology fields
+        return externalRecord.getPID().equals(registryRecord.getPID()) &&
+                externalRecord.getHostAddress().equals(registryRecord.getHostAddress()) &&
+                externalRecord.getClientPort() == registryRecord.getClientPort() &&
+                externalRecord.getPeerPort() == registryRecord.getPeerPort() &&
+                externalRecord.getMaxClientCount() == registryRecord.getMaxClientCount();
+    }
 
 
     /**
@@ -143,18 +200,16 @@ public class ChatServerRegistry {
      * with the same ID already exists, it logs a warning message (and overwrites it).
      * </p>
      *
-     * @param serverPID the unique process ID generated by the Primary {@code AddressingServer} for this chat server.
+     * @param serverPID       the unique process ID generated by the Primary {@code AddressingServer} for this chat server.
      * @param chatHostAddress the host address (IP or hostname) of the chat server.
-     * @param addrServerPort The port used for communication with the addressing server.
      * @param chatClientPort  the port used for client connections.
      * @param chatPeerPort    the port used for peer-to-peer (gossip) communication.
      * @param maxClientCount  the maximum number of client connections allowed for this server.
-     *
      */
-    public void createChatServerRecord(Long serverPID, String chatHostAddress, int addrServerPort, int chatClientPort,
-                                        int chatPeerPort, int maxClientCount) {
+    public void createChatServerRecord(Long serverPID, String chatHostAddress, int chatClientPort,
+                                       int chatPeerPort, int maxClientCount) {
         try {
-            ChatServerRecord newServer = new ChatServerRecord(serverPID, chatHostAddress,  chatClientPort, chatPeerPort, addrServerPort,
+            ChatServerRecord newServer = new ChatServerRecord(serverPID, chatHostAddress,  chatClientPort, chatPeerPort,
                     maxClientCount);
 
             // Check if the key already existed (should be null for a new key)
@@ -174,39 +229,16 @@ public class ChatServerRegistry {
 
 
     /**
-     * Logs the details of this ChatServerRecord object to the console for debugging purposes.
+     * Triggers a detailed diagnostic print of all currently registered Chat Servers.
+     * <p>
+     * This method retrieves the live {@link ChatServerRecord} collection to display
+     * real-time server metrics, including active client counts and current operational
+     * status (e.g., ACTIVE, PIVOTING). Useful for monitoring load distribution
+     * across the cluster.
+     * </p>
      */
-    public void debugPrintServer(ChatServerRecord s) {
-        System.out.println("\t---------- ChatServerRecord Record ----------");
-        System.out.printf("\tProcess ID : %s%n", s.getPID());
-        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
-        System.out.printf("\tClient Port  : %d%n", s.getClientPort());
-        System.out.printf("\tPeer Port    : %d%n", s.getPeerPort());
-        System.out.printf("\tClient Count : %d%n", s.getClientCount());
-        System.out.printf("\tStatus       : %s%n", s.getStatus());
-        System.out.println("\t-------------------------------------------");
-    }
-
-    public void debugPrintInsertServerPID(ChatServerRecord s) {
-        System.out.println("\t------ Inserting ChatServer Record -------");
-        System.out.printf("\tProcess ID : %s%n", s.getPID());
-        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
-        System.out.println("\t------------------------------------------");
-    }
-
-    public void debugPrintUpdateServerPID(ChatServerRecord s) {
-        System.out.println("\t------ Updating ChatServer Record -------");
-        System.out.printf("\tProcess ID : %s%n", s.getPID());
-        System.out.printf("\tHost Address : %s%n", s.getHostAddress());
-        System.out.println("\t------------------------------------------");
-    }
-
     public void debugPrintAllServers() {
-        System.out.println("|--------------- Currently Registered ChatServer's ---------------|");
-        for (ChatServerRecord s : this.chatServerRecords.values()){
-            debugPrintServer(s);
-        }
-        System.out.println("|-----------------------------------------------------------------|");
+        ServerDebugLogger.printAllChatServers(this.getRecords().values());
     }
 
 }

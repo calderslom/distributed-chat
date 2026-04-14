@@ -39,6 +39,18 @@ public class RequestObjectTypes {
      */
     public static final String SINGLE_CS_RECORD = "SINGLE_CS_RECORD";
 
+    /**
+     * Request for a collection containing the network PIDs of all currently
+     * registered Addressing Servers (Peers) in the cluster.
+     */
+    public static final String ALL_PEER_PIDS = "ALL_PEER_PIDS";
+
+    /**
+     * Request for a collection containing the network PIDs of all currently
+     * registered Chat Servers in the network.
+     */
+    public static final String ALL_CS_PIDS = "ALL_CS_PIDS";
+
 
     // Preventing any possible instantiation of the utility class
     private RequestObjectTypes() {}

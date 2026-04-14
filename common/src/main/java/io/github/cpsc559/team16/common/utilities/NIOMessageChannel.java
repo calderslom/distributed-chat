@@ -242,4 +242,12 @@ public class NIOMessageChannel {
         this.serverPID = pid;
     }
 
+    /**
+     * Checks if the underlying SocketChannel is open and connected.
+     * * @return {@code true} if the channel is open, {@code false} otherwise.
+     */
+    public boolean isOpen() {
+        return this.channel != null && this.channel.isOpen() && this.channel.isConnected();
+    }
+
 }

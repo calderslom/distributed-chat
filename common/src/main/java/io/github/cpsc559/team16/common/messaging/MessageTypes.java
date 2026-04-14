@@ -12,14 +12,28 @@ package io.github.cpsc559.team16.common.messaging;
  */
 public class MessageTypes {
     /**
-     * Message type for registration requests. Used when a process is trying to register with the network.
+     * Message type for registration requests. Used when a new process is trying to register with the network.
      */
     public static final String REGISTER = "REGISTER";
+
+    /**
+     * Message type for registration requests. Used when an existing process is trying to synchronize with the PRIMARY.
+     */
+    public static final String SYNCHRONIZE = "SYNCHRONIZE";
 
     /**
      * Message type for update messages. Used when a process is sending an updated state or record.
      */
     public static final String UPDATE = "UPDATE";
+
+    /**
+     * Represents a standard response from the Primary Addressing Server.
+     * <p>
+     * This constant is used as the {@code objectType} in messages sent by the
+     * Primary to return requested data (like the current server list) to a Chat Server or Replica.
+     * </p>
+     */
+    public static final String PRIMARY_RESPONSE = "PRIMARY_RESPONSE";
 
     /**
      * Message type for request messages.
@@ -35,6 +49,14 @@ public class MessageTypes {
      * Message type for ping messages, typically used to verify connectivity or for heartbeat purposes.
      */
     public static final String PING = "PING";
+
+    /**
+     * Message type for instructing a remote process that has been flagged as failed
+     * to shutdown (exit safely and do not restart).
+     * <p>Failed processes are disconnected from the network automatically, but this provides
+     * an additional layer of protection by fencing in the failed process.</p>
+     */
+    public static final String SHUTDOWN = "SHUTDOWN";
 
     /**
      * Message type for instructing a remote process that has been flagged as failed

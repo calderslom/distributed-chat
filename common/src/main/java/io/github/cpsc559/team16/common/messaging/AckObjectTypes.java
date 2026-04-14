@@ -13,6 +13,12 @@ package io.github.cpsc559.team16.common.messaging;
  */
 public class AckObjectTypes {
 
+    /**
+     * Used to send an acknowledgement from the new PRIMARY AddressingServer to a REPLICA
+     * process that it has been synchronized following a leadership election and a persistent
+     * connection has been established.
+     */
+    public static final String SYNCHRONIZED = "Synchronized";
 
     /**
      * Used to send an acknowledgement to a ChatServer or AddressingServer process that

@@ -1,8 +1,6 @@
 package io.github.cpsc559.team16.addressingserver;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import io.github.cpsc559.team16.common.dto.ChatServerRecord;
-import io.github.cpsc559.team16.common.exceptions.ConnectionClosedException;
 import io.github.cpsc559.team16.common.messaging.*;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
 
@@ -132,22 +130,23 @@ public class ConnectionCleanupManager {
      * failure).</li>
      * <li>Removes the connection from either the {@code PeerManager} or
      * {@code ChatServerManager}.</li>
+     * <li>Removes the server record associated with the connection from the appropriate
+     * {@code AddrServerRegistry} or {@code ChatServerRegistry}</li>
      * <li>Cancels the selection key and closes the channel gracefully.</li>
      * </ul>
      * </p>
      *
      * @param nioChannel the {@code NIOMessageChannel} associated with the error.
-     * @param cce        {@code true} if the cleanup is due to a remote disconnect
-     *                   (i.e., {@link ConnectionClosedException}),
-     *                   {@code false} if due to a local I/O failure.
+     * @param broadcastFailure  {@code true} if a system-wide broadcast of the connection failure should be performed.
+     *                   {@code false} if only local cleanup should be performed.
      */
-    public void cleanupPersistentConnectionNIO(NIOMessageChannel nioChannel, Boolean cce) {
+    public void cleanupPersistentConnectionNIO(NIOMessageChannel nioChannel, Boolean broadcastFailure) {
         SocketChannel channel = nioChannel.getSocketChannel();
-        if (cce) {
+        if (broadcastFailure) {
             NIOMessageChannel ch = getKnownPersistentChannel(channel);
             if (ch != null) {
                 Long failedPID = ch.getServerPID();
-                if (failedPID != 0L) { // OL represents an unregistered process - so registering the server is
+                if (failedPID != 0L) { // OL represents an unregistered process - so de-registering the server is
                                        // unnecessary
                     Long primaryPID = peerManager.getPrimaryPID();
                     if (chatServerManager.getChannels().containsKey(channel)) {
@@ -163,7 +162,7 @@ public class ConnectionCleanupManager {
                         long messageID = genMID.nextID();
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received
-                        ServerFailureMessage<Long> msg = this.getFailureMessage(messageID, primaryPID, failedPID,
+                        ServerFailureMessage<Long> msg = this.createFailureMessage(messageID, primaryPID, failedPID,
                                 Roles.CHATSERVER);
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received.
@@ -176,21 +175,17 @@ public class ConnectionCleanupManager {
                         // (unregistered channels) will not be included.
                         broadcastFailureToReplicas(msg, primaryPID, failedPID, Roles.CHATSERVER);
                     } else if (peerManager.getChannels().containsKey(channel)) {
-                        // Create Pending event here
-
-                        // Create Pending event here
                         // Get the list of all NIOMessage channels for registered peers (non-zero PID)
                         Map<Long, NIOMessageChannel> replicaChannelMap = peerManager
                                 .getRegisteredReplicaChannelMapNoFailedPID(failedPID);
                         // Create unique message ID that will be used to track ACK messages as well as
                         // the pending event.
                         long messageID = genMID.nextID();
-                        // Create a new event that will trigger once all ACKs for synchronizing state
-                        // have been received
-                        ServerFailureMessage<Long> msg = this.getFailureMessage(messageID, primaryPID, failedPID,
+                        // DEBUG
+                        ServerFailureMessage<Long> msg = this.createFailureMessage(messageID, primaryPID, failedPID,
                                 Roles.REPLICA);
                         for (Long pid : replicaChannelMap.keySet()) {
-                            System.out.println("PID for the PendingEvent replica = " + pid);
+                            System.out.println("PID of the replica sent a ServerFailureMessage = " + pid);
                         }
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received.
@@ -201,17 +196,17 @@ public class ConnectionCleanupManager {
                         replicaCoordinator.addPendingEvent(messageID, event);
                         // Broadcast the message to all current Replicas. Any NIOChannel with PID 0
                         // (unregistered channels) will not be included.
-                        broadcastFailureToReplicas(msg, primaryPID, failedPID, Roles.REPLICA);
+                        //broadcastFailureToReplicas(msg, primaryPID, failedPID, Roles.REPLICA);
 
-                        broadcastServerFailure(peerManager.getPrimaryPID(), failedPID, Roles.REPLICA);
-                        peerManager.removeProcessCloseConnection(channel);
+                        broadcastServerFailure(primaryPID, failedPID, Roles.REPLICA);
+                        peerManager.removeRemoteProcess(channel);
                         this.peerManager.debugPrintAllServers();
                     }
                 } else {
                     if (chatServerManager.getChannels().containsKey(channel)) {
-                        chatServerManager.removeProcessCloseConnection(channel);
+                        chatServerManager.removeRemoteProcess(channel);
                     } else if (peerManager.getChannels().containsKey(channel)) {
-                        peerManager.removeProcessCloseConnection(channel);
+                        peerManager.removeRemoteProcess(channel);
                     }
                 }
             }
@@ -236,23 +231,23 @@ public class ConnectionCleanupManager {
      * failure).</li>
      * <li>Removes the connection from either the {@code PeerManager} or
      * {@code ChatServerManager}.</li>
+     * <li>Removes the server record associated with the connection from the appropriate
+     * {@code AddrServerRegistry} or {@code ChatServerRegistry}</li>
      * <li>Cancels the selection key and closes the channel gracefully.</li>
      * </ul>
      * </p>
      *
-     * @param channel the {@code SocketChannel} being cleaned up.
-     * @param cce     {@code true} if the cleanup is due to a remote disconnect
-     *                (i.e., {@link ConnectionClosedException}),
-     *                {@code false} if due to a local I/O failure.
+     * @param channel the {@code NIOMessageChannel} associated with the error.
+     * @param broadcastFailure  {@code true} if a system-wide broadcast of the connection failure should be performed.
+     *                   {@code false} if only local cleanup should be performed.
      */
-    public void cleanupPersistentConnection(SocketChannel channel, Boolean cce) {
-        if (cce) {
+    public void cleanupPersistentConnection(SocketChannel channel, Boolean broadcastFailure) {
+        if (broadcastFailure) {
             NIOMessageChannel ch = getKnownPersistentChannel(channel);
             if (ch != null) {
                 System.out.println("Channel not null");
                 Long failedPID = ch.getServerPID();
-                if (failedPID != 0L) { // OL represents an unregistered process - so registering the server is
-                                       // unnecessary
+                if (failedPID != 0L) { // OL represents an unregistered process, so un-registering the server isn't needed
                     System.out.println("Unregistered process");
 
                     Long primaryPID = peerManager.getPrimaryPID();
@@ -269,7 +264,7 @@ public class ConnectionCleanupManager {
                         long messageID = genMID.nextID();
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received
-                        ServerFailureMessage<Long> msg = this.getFailureMessage(messageID, primaryPID, failedPID,
+                        ServerFailureMessage<Long> msg = this.createFailureMessage(messageID, primaryPID, failedPID,
                                 Roles.CHATSERVER);
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received.
@@ -284,9 +279,6 @@ public class ConnectionCleanupManager {
                         broadcastFailureToReplicas(msg, primaryPID, failedPID, Roles.CHATSERVER);
                     } else if (peerManager.getChannels().containsKey(channel)) {
                         // Create Pending event here
-                        System.out.println("in else If");
-
-                        // Create Pending event here
                         // Get the list of all NIOMessage channels for registered peers (non-zero PID)
                         Map<Long, NIOMessageChannel> replicaChannelMap = peerManager
                                 .getRegisteredReplicaChannelMapNoFailedPID(failedPID);
@@ -298,7 +290,7 @@ public class ConnectionCleanupManager {
                         long messageID = genMID.nextID();
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received
-                        ServerFailureMessage<Long> msg = this.getFailureMessage(messageID, primaryPID, failedPID,
+                        ServerFailureMessage<Long> msg = this.createFailureMessage(messageID, primaryPID, failedPID,
                                 Roles.REPLICA);
                         // Create a new event that will trigger once all ACKs for synchronizing state
                         // have been received.
@@ -313,15 +305,17 @@ public class ConnectionCleanupManager {
 
                         System.out.println("Broadcasting");
                         broadcastServerFailure(peerManager.getPrimaryPID(), failedPID, Roles.REPLICA);
-                        peerManager.removeProcessCloseConnection(channel);
+                        peerManager.removeRemoteProcess(channel);
                         this.peerManager.debugPrintAllServers();
                     }
                 } else {
                     System.out.println("Else");
                     if (chatServerManager.getChannels().containsKey(channel)) {
-                        chatServerManager.removeProcessCloseConnection(channel);
+                        chatServerManager.removeRemoteProcess(channel);
+                        this.chatServerManager.debugPrintAllServers();
                     } else if (peerManager.getChannels().containsKey(channel)) {
-                        peerManager.removeProcessCloseConnection(channel);
+                        peerManager.removeRemoteProcess(channel);
+                        this.peerManager.debugPrintAllServers();
                     }
                 }
             }
@@ -334,8 +328,8 @@ public class ConnectionCleanupManager {
         } // if the channel is already closed, we don't need to do anything.
     }
 
-    private ServerFailureMessage<Long> getFailureMessage(Long messageID, Long senderPID, Long failedPID,
-            String failedServerRole) {
+    private ServerFailureMessage<Long> createFailureMessage(Long messageID, Long senderPID, Long failedPID,
+                                                            String failedServerRole) {
         // Create the message with the proper {@code ObjectType} so the receiver knows
         // which kind of record/connection to remove.
         ServerFailureMessage<Long> message;
@@ -370,7 +364,7 @@ public class ConnectionCleanupManager {
      * </p>
      *
      */
-    private void broadcastFailureToReplicas(BaseAddrServerMessage<?> message, Long senderPID, Long failedPID,
+    public void broadcastFailureToReplicas(BaseAddrServerMessage<?> message, Long senderPID, Long failedPID,
             String failedServerRole) {
         // Serialize the message and return if a failure occurs. This would only happen
         // because of a
@@ -396,7 +390,7 @@ public class ConnectionCleanupManager {
             } catch (IOException ioe) {
                 System.err.printf("Failed to send ServerFailureMessage<%s> on peer channel (remote PID: %s): %s%n",
                         message.getObjectType(), nioChannel.getServerPID(), ioe.getMessage());
-                cleanupPersistentConnectionNIO(nioChannel, true);
+                cleanupPersistentConnectionNIO(nioChannel, false);
             }
         }
     }
@@ -429,7 +423,7 @@ public class ConnectionCleanupManager {
      *                         {@link Roles#CHATSERVER} or an addressing server
      *                         role)
      */
-    private void broadcastFailureToChatServers(BaseAddrServerMessage<?> message, Long senderPID, Long failedPID,
+    public void broadcastFailureToChatServers(BaseAddrServerMessage<?> message, Long senderPID, Long failedPID,
             String failedServerRole) {
         // Create the message with the proper {@code ObjectType} so the receiver knows
         // which kind of record/connection to remove.
@@ -458,7 +452,7 @@ public class ConnectionCleanupManager {
                 System.err.printf(
                         "Failed to send ServerFailureMessage<%s> on chat server channel (remote PID: %s): %s%n",
                         message.getObjectType(), nioChannel.getServerPID(), ioe.getMessage());
-                cleanupPersistentConnectionNIO(nioChannel, true);
+                cleanupPersistentConnectionNIO(nioChannel, false);
             }
         }
     }
@@ -491,52 +485,121 @@ public class ConnectionCleanupManager {
      *                         {@link Roles#CHATSERVER} or an addressing server
      *                         role)
      */
-    private void broadcastServerFailure(Long senderPID, Long failedPID, String failedServerRole) {
-        // Create the message with the proper {@code ObjectType} so the receiver knows
-        // which kind of record/connection to remove.
+    public void broadcastServerFailure(Long senderPID, Long failedPID, String failedServerRole) {
         ServerFailureMessage<Long> message;
         if (failedServerRole.equals(Roles.CHATSERVER)) {
             message = ServerFailureMessage.chatServerFailed(senderPID, Roles.PRIMARY, failedServerRole, failedPID);
-        } else { // It's an addressing server (REPLICA or PRIMARY)
+        } else {
             message = ServerFailureMessage.addrServerFailed(senderPID, Roles.PRIMARY, failedServerRole, failedPID);
         }
-        // Serialize the message and return if a failure occurs. This would only happen
-        // because of a
-        // logic error introduced by us (the programmers), so it shouldn't shut down the
-        // program, but we need to log it and fix it.
-        String jsonMessage;
-        try {
-            jsonMessage = message.toJson();
-        } catch (JsonProcessingException e) {
-            System.err.printf(
-                    "Failed to serialize ServerFailureMessage<%s> for broadcast. Context: senderPID=%d, senderRole=%s, failedPID=%d, failedServerRole=%s. Exception: %s%n",
-                    message.getObjectType(), senderPID, Roles.PRIMARY, failedPID, failedServerRole, e.getMessage());
-            return;
-        }
-        // Send the message to each addressing server in the network. If a failure
-        // occurs, handle removing the process appropriately.
-        for (NIOMessageChannel nioChannel : peerManager.getChannels().values()) {
-            try {
-                nioChannel.sendMessage(jsonMessage);
-            } catch (IOException ioe) {
-                System.err.printf("Failed to send ServerFailureMessage<%s> on peer channel (remote PID: %s): %s%n",
-                        message.getObjectType(), nioChannel.getServerPID(), ioe.getMessage());
-                cleanupPersistentConnectionNIO(nioChannel, true);
-            }
-        }
-        // Send the message to each chat server in the network. If a failure occurs,
-        // handle removing the process appropriately.
-        for (NIOMessageChannel nioChannel : chatServerManager.getChannels().values()) {
-            try {
-                nioChannel.sendMessage(jsonMessage);
-            } catch (IOException ioe) {
-                System.err.printf(
-                        "Failed to send ServerFailureMessage<%s> on chat server channel (remote PID: %s): %s%n",
-                        message.getObjectType(), nioChannel.getServerPID(), ioe.getMessage());
-                cleanupPersistentConnectionNIO(nioChannel, true);
-            }
+        broadcastFailureToReplicas(message, senderPID, failedPID, failedServerRole);
+        broadcastFailureToChatServers(message, senderPID, failedPID, failedServerRole);
+    }
+
+    /**
+     * Gracefully closes the outbound connection to the Primary without
+     * triggering failure broadcasts to the rest of the network.
+     * <p>
+     *     Removes the server record associated with the failed PRIMARY addressing server
+     *     from the {@code AddrServerRegistry}.
+     *</p>
+     *<p>
+     *     Typically used by REPLICA addressing servers at the end of a leader election.
+     *</p>
+     */
+    public void disconnectFromPrimaryQuietly() {
+        NIOMessageChannel primaryChannel = peerManager.getPrimaryNIOChannel();
+        if (primaryChannel != null) {
+            System.out.println("DEBUG: Initiating graceful disconnect from Primary (PID: "
+                    + primaryChannel.getServerPID() + ")");
+            // By passing 'false', we bypass the 'if (broadcastFailure)' block in cleanupPersistentConnectionNIO
+            // This prevents any ServerFailureMessages from being generated.
+            cleanupPersistentConnectionNIO(primaryChannel, false);
+        } else {
+            System.out.println("DEBUG: No active Primary connection found to close.");
         }
     }
+
+    /**
+     * Generic helper to handle the serialization and transmission of messages.
+     * * @param channel The NIO channel to send through.
+     * @param message The message object to be sent.
+     * @return true if sent subroadcastFailuressfully, false otherwise.
+     */
+    public boolean sendMessage(NIOMessageChannel channel, BaseAddrServerMessage<?> message) {
+        if (channel == null || !channel.isOpen()) {
+            System.err.println("Warning: Attempted to send to a null or closed channel.");
+            return false;
+        }
+
+        try {
+            String jsonMessage = message.toJson();
+            channel.sendMessage(jsonMessage);
+            return true;
+        } catch (JsonProcessingException e) {
+            System.err.printf("Serialization error for message %s: %s%n",
+                    message.getObjectType(), e.getMessage());
+        } catch (IOException ioe) {
+            System.err.printf("Network error sending to PID %d: %s%n",
+                    channel.getServerPID(), ioe.getMessage());
+            cleanupPersistentConnectionNIO(channel, true);
+        }
+        return false;
+    }
+
+
+
+    /**
+     *
+     * @param senderRole The {@link Roles} of the {@link AddressingServer} process sending the message.
+     * @param failedPID The unique network PID of the failed process being told to shut down.
+     */
+    public void sendShutdownRequestToChatServer(String senderRole, long failedPID) {
+
+    }
+
+    /**
+     * Forwards a shutdown request to the PRIMARY server after detecting a peer failure.
+     * <p>
+     * Verifies that a valid connection to the PRIMARY exists and that the targeted
+     * {@code failedPID} matches the current PRIMARY identity before transmitting
+     * the {@link ShutdownMessage}.
+     * </p>
+     *
+     * @param senderPID the PID of the server reporting the failure.
+     * @param failedPID the PID of the PRIMARY server that is suspected to have failed.
+     */
+    public void sendShutdownRequestToPrimary(long senderPID, long failedPID) {
+        NIOMessageChannel nioChannel = peerManager.getPrimaryNIOChannel();
+        // Safety check: if there's no primary, we can't send a request to it
+        if (nioChannel == null) {
+            System.err.println("Warning: Primary channel is null. Cannot send ShutdownRequest for PID: " + failedPID);
+            return;
+        }
+        else {
+            if (nioChannel.getServerPID().equals(failedPID)) {
+                sendMessage(nioChannel, ShutdownMessage.toPrimary(genMID.nextID(), senderPID, failedPID));
+            }
+            else {
+                System.err.println("Warning: Failed PRIMARY PID does not match current PRIMARY connection PID." +
+                        "Shutdown message request aborted.");
+            }
+
+        }
+    }
+
+    public void sendShutdownRequestToReplica(long senderPID, NIOMessageChannel replicaChannel, long replicaPID) {
+        if (replicaChannel == null) {
+            System.err.println("Warning: NIO channel is null. Cannot send ShutdownRequest for PID: " + replicaPID);
+            return;
+        }
+        else {
+            sendMessage(replicaChannel,
+                    ShutdownMessage.toReplica(this.genMID.nextID(), senderPID, Roles.PRIMARY, replicaPID));
+        }
+    }
+
+
 
     /**
      * Creates a new {@link PendingEvent} for chat server deregistration.
@@ -556,12 +619,10 @@ public class ConnectionCleanupManager {
                                                                 // AddressingServer STATES ARE CONSISTENT.
             System.out.println(
                     "PRIMARY has received all ACK's from REPLICA's - server state synchronized, sending failure message to ChatServer's.");
-            // All replicas have successfully replicated the update. Update state locally
+            // All replicas have subroadcastFailuressfully replicated the update. Update state locally
             // and continue with response.
             this.broadcastFailureToChatServers(message, primaryPID, failedPID, failedRole);
-            // Create event for messaging chat
-            // TODO - Create event for messaging chat servers
-            this.chatServerManager.removeProcessCloseConnection(channel);
+            this.chatServerManager.removeRemoteProcess(channel);
             this.chatServerManager.debugPrintAllServers();
         });
     }
@@ -585,12 +646,11 @@ public class ConnectionCleanupManager {
                                                                 // AddressingServer STATES ARE CONSISTENT.
             System.out.println(
                     "PRIMARY has received all ACK's from REPLICA's - server state synchronized, sending failure message to ChatServer's.");
-            // All replicas have successfully replicated the update. Update state locally
+            // All replicas have subroadcastFailuressfully replicated the update. Update state locally
             // and continue with response.
-            this.broadcastFailureToChatServers(message, primaryPID, failedPID, failedRole);
-            // Create event for messaging chat servers
-            // TODO - Create event for messaging chat servers
-            this.peerManager.removeProcessCloseConnection(channel);
+            broadcastFailureToChatServers(message, primaryPID, failedPID, failedRole);
+            sendShutdownRequestToReplica(primaryPID, this.peerManager.getPeerChannels().get(channel), failedPID);
+            this.peerManager.removeRemoteProcess(channel);
             this.peerManager.debugPrintAllServers();
         });
     }

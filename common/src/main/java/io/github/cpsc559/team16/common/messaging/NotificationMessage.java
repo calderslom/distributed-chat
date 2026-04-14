@@ -1,6 +1,9 @@
 package io.github.cpsc559.team16.common.messaging;
 
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * A specialized message used to send notifications about events or updates within the distributed system.
  * <p>
@@ -25,6 +28,18 @@ package io.github.cpsc559.team16.common.messaging;
  */
 public class NotificationMessage<T> extends BaseAddrServerMessage<T> {
 
+    // Jackson Constructor
+    @JsonCreator
+    public NotificationMessage(
+            @JsonProperty("messageID") long messageID,
+            @JsonProperty("msgType") String msgType,
+            @JsonProperty("objectType") String objectType,
+            @JsonProperty("senderPID") long senderPID,
+            @JsonProperty("senderRole") String senderRole,
+            @JsonProperty("targetRole") String targetRole,
+            @JsonProperty("payload") T payload) {
+        super(messageID, msgType, objectType, senderPID, senderRole, targetRole, payload);
+    }
 
     /**
      * Private constructor to prevent direct instantiation and enforce the use of factory methods.
@@ -52,6 +67,7 @@ public class NotificationMessage<T> extends BaseAddrServerMessage<T> {
     private NotificationMessage(long messageID, String objectType, long senderPID, String senderRole, String targetRole, T payload) {
         super(messageID, MessageTypes.NOTIFICATION, objectType, senderPID, senderRole, targetRole, payload);
     }
+
 
 
     /**

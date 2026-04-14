@@ -5,7 +5,7 @@ import java.nio.channels.SocketChannel;
 import java.util.LinkedList;
 import java.util.Queue;
 
-import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 
 /**
  * Holds the connection context for each client or peer server connection.
@@ -24,7 +24,7 @@ import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
  * the connection.</li>
  * <li><strong>type:</strong> The type of the connection (client or peer
  * server). This is determined by the
- * connection context type in {@link ChatServer.ConnectionType}.</li>
+ * connection context type in {@link ConnectionType}.</li>
  * <li><strong>readBuffer:</strong> A buffer used for reading incoming data from
  * the socket channel.</li>
  * <li><strong>writeQueue:</strong> A queue of {@link ByteBuffer} objects that
@@ -59,8 +59,7 @@ import io.github.cpsc559.team16.chatserver.ChatServer.ConnectionType;
  * context, setting the initial values
  * for attributes like {@code lastActivityTime}.
  * </p>
- * 
- * @param socketChannel the {@link SocketChannel} associated with the connection
+ *
  */
 
 public class ConnectionContext {
@@ -71,7 +70,7 @@ public class ConnectionContext {
     public Queue<ByteBuffer> writeQueue = new LinkedList<>();
     public StringBuilder partialData = new StringBuilder();
 
-    public int peerID = -1;
+    public long peerPID = -1;
     public String username;
 
     public String host; // IP or hostname
@@ -80,6 +79,12 @@ public class ConnectionContext {
     public long lastActivityTime = System.currentTimeMillis();
     public boolean awaitingPong = false;
     public int missedPongs = 0;
+
+    // Connections are attempted up to 3 times before a failure message is generated
+    public int retryCount = 0;
+    public static final int MAX_RETRIES = 3;
+
+    public volatile boolean needsClosing = false;
 
     public ConnectionContext(SocketChannel socketChannel) {
         this.socketChannel = socketChannel;

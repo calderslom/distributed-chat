@@ -1,5 +1,8 @@
 package io.github.cpsc559.team16.common.messaging;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * Represents an "REQUEST" type message used for sending REQUESTs to Addressing Servers,
  * Replicas, and Chat Servers.
@@ -10,6 +13,19 @@ package io.github.cpsc559.team16.common.messaging;
  * @param <T> The type of data being sent as the payload (e.g., {@code ChatServerRecord}, {@code AddrServerRecord}).
  */
 public class RequestMessage<T> extends BaseAddrServerMessage<T> {
+
+    // Jackson Constructor
+    @JsonCreator
+    public RequestMessage(
+            @JsonProperty("messageID") long messageID,
+            @JsonProperty("msgType") String msgType,
+            @JsonProperty("objectType") String objectType,
+            @JsonProperty("senderPID") long senderPID,
+            @JsonProperty("senderRole") String senderRole,
+            @JsonProperty("targetRole") String targetRole,
+            @JsonProperty("payload") T payload) {
+        super(messageID, msgType, objectType, senderPID, senderRole, targetRole, payload);
+    }
 
     /**
      * Constructs an "REQUEST" message.
@@ -81,5 +97,12 @@ public class RequestMessage<T> extends BaseAddrServerMessage<T> {
         return new RequestMessage<>(messageID, RequestObjectTypes.ALL_SERVER_RECORDS, senderPID, Roles.REPLICA, Roles.PRIMARY, null);
     }
 
+    public static RequestMessage<Void> requestAllPeerPids(long messageID, long senderPID) {
+        return new RequestMessage<>(messageID, RequestObjectTypes.ALL_PEER_PIDS, senderPID, Roles.REPLICA, Roles.PRIMARY, null);
+    }
+
+    public static RequestMessage<Void> requestAllChatServerPids(long messageID, long senderPID) {
+        return new RequestMessage<>(messageID, RequestObjectTypes.ALL_CS_PIDS, senderPID, Roles.REPLICA, Roles.PRIMARY, null);
+    }
 
 }

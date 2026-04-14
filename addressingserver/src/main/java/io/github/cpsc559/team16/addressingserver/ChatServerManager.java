@@ -3,12 +3,19 @@ package io.github.cpsc559.team16.addressingserver;
 import java.io.IOException;
 import java.nio.channels.SocketChannel;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
+import io.github.cpsc559.team16.common.logging.ServerDebugLogger;
 import io.github.cpsc559.team16.common.messaging.AckMessage;
+import io.github.cpsc559.team16.common.messaging.Roles;
+import io.github.cpsc559.team16.common.messaging.ServerFailureMessage;
 import io.github.cpsc559.team16.common.messaging.UpdateMessage;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
+
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 public class ChatServerManager {
 
@@ -50,19 +57,22 @@ public class ChatServerManager {
      * @param channel the {@code SocketChannel} representing the peer connection to remove.
      *                <strong>NOTE:</strong> This method does not close the SocketChannel connection. It is up to the calling
      *                code to enact this behaviour.
+     * @return true if a record for the remote process existed in the {@link ChatServerRegistry}; false otherwise.
      */
-    private void removeRemoteProcess(SocketChannel channel) {
+    public boolean removeRemoteProcess(SocketChannel channel) {
         NIOMessageChannel ch = this.chatServerChannels.get(channel);
-        if (ch != null) {
-            Long pid = ch.getServerPID();
-            if (pid != 0L) {
-                this.registry.removeRecordByKey(pid);
-                System.out.println("Removed the network communication channels for the ChatServer with PID: " + pid);
-            } else {
-                System.err.println("Removed a NIOMessageChannel and SocketChannel connection for a ChatServer that had no ChatServerRecord. It's network PID was - " + pid);
-            }
-            this.chatServerChannels.remove(channel);
-        }
+        if (ch == null) return false;
+
+        Long pidFromChannel = ch.getServerPID();
+
+        // Stage 1: Remove Channel whether the process is registered or not.
+        this.chatServerChannels.remove(channel);
+        try {
+            System.out.printf("Purging ChatServer connection [%s] for PID %d %n", channel.getRemoteAddress(), pidFromChannel);
+        } catch (IOException ignore) {}
+
+        // Stage 2: Remove any record that may exist for the peer connection from the registry
+        return this.registry.removeRecordByKey(pidFromChannel);
     }
 
     /**
@@ -78,13 +88,13 @@ public class ChatServerManager {
      * </p>
      *
      * @param channelToRemove the {@code SocketChannel} representing the connection to be removed and closed.
+     * @return true if a record for the remote process existed in the {@link ChatServerRegistry}; false otherwise.
      */
-    public void removeProcessCloseConnection(SocketChannel channelToRemove) {
-        this.removeRemoteProcess(channelToRemove);
-        try {
-            channelToRemove.close();
-        } catch (IOException ignored) {
-        };
+    public boolean removeProcessCloseConnection(SocketChannel channelToRemove) {
+        boolean recordRemoved = this.removeRemoteProcess(channelToRemove);
+        try { channelToRemove.close(); }
+        catch(IOException ignored) {};
+        return recordRemoved;
     }
 
 
@@ -99,17 +109,71 @@ public class ChatServerManager {
      * </p>
      *
      * @param failedPID the process ID of the failed chat server to remove
+     * @return true if a record for the remote process existed in the {@link ChatServerRegistry}; false otherwise.
      */
-    public void removeFailedChatServer(Long failedPID) {
-        for (SocketChannel channel : chatServerChannels.keySet()) {
-            if (chatServerChannels.get(channel).getServerPID().equals(failedPID)) {
-                removeProcessCloseConnection(channel);
-                return;
+    public boolean removeFailedChatServer(Long failedPID) {
+        debug(DEBUG_NORMAL, "Attempting to remove failed ChatServer: PID " + failedPID);
+        // NIOChannel objects should always have an instance variable set that references the PID of the remote process.
+        // We iterate through all the channels(keys) and respective NIOMessageChannels(values) until we find a match.
+        for (Map.Entry<SocketChannel, NIOMessageChannel> entry : chatServerChannels.entrySet()) {
+            if (entry.getValue().getServerPID().equals(failedPID)) {
+                debug(DEBUG_DETAILED, "Found active channel for ChatServer PID " + failedPID + ". Closing connection.");
+                return removeProcessCloseConnection(entry.getKey()); // Successfully found and cleaned up via channel
             }
         }
-        this.registry.removeRecordByKey(failedPID);
+        debug(DEBUG_NORMAL, "No active channel found for ChatServer PID " + failedPID + ". Attempting direct registry removal.");
+        return this.registry.removeRecordByKey(failedPID); // Channel did not exist, try and remove record anyways.
     }
 
+    /**
+     * Synchronizes the ChatServer registry with the current network state by identifying
+     * and removing "ghost" records.
+     * <p>
+     * A ghost record occurs when a ChatServer crashes simultaneously with the Primary
+     * Addressing Server. Since the record exists in the replicated registry but the
+     * physical TCP connection is gone, this method performs a proactive reconciliation.
+     * </p>
+     * * <p>The audit follows a three-stage process:</p>
+     * <ul>
+     * <li><b>Stage 1:</b> Collects PIDs from all active {@code NIOMessageChannel} connections.</li>
+     * <li><b>Stage 2:</b> Filters the registry to identify PIDs that exist in the records
+     * but lack an active connection.</li>
+     * <li><b>Stage 3:</b> Triggers a formal system-wide failure broadcast for each ghost
+     * and purges the stale record from the local registry.</li>
+     * </ul>
+     *
+     * @param myPid      The PID of the current server (the new Primary) performing the audit.
+     * @param cleanupManager The manager used to broadcast failure messages to the rest of the network.
+     */
+    public void auditRegistryConnections(Long myPid, ConnectionCleanupManager cleanupManager) {
+        // Stage 1: Create a set containing the PIDs of all ChatServers who have active connections to the PRIMARY.
+        Set<Long> connectedPids = chatServerChannels.values().stream()
+                .map(NIOMessageChannel::getServerPID)
+                .collect(Collectors.toSet());
+
+        // Add my (the PRIMARY addressing server) PID to ensure my record is not tagged for removal.
+        connectedPids.add(myPid);
+
+        // Stage 2: Identify any "Ghosts" (ChatServer processes who are in the registry but NOT in active connections)
+        Set<Long> failedPids = this.registry.getRecords().keySet().stream()
+                .filter(pid -> !connectedPids.contains(pid))  // if pid not in connectedPids, then collect the pid
+                .collect(Collectors.toSet());
+
+        if (failedPids.isEmpty()) {
+            debug(DEBUG_DETAILED, "ChatServer Registry audit complete: No stale records found.");
+            return;
+        }
+
+        debug(DEBUG_BASIC, "[ChatServerManager] An audit of the ChatServerRegistry detected ghost records. Triggering failure broadcast.");
+
+        // Stage 3: Remove all failed ChatServer processes from the registry and broadcast their failure
+        for (Long failedPid : failedPids) {
+            debug(DEBUG_BASIC, "Handling ghost record for PID: " + failedPid + ".");
+            ServerFailureMessage<Long> msg = ServerFailureMessage.chatServerFailed(myPid, Roles.PRIMARY, Roles.CHATSERVER, failedPid);
+            cleanupManager.broadcastFailureToReplicas(msg, myPid, failedPid, Roles.CHATSERVER);
+            this.registry.removeRecordByKey(failedPid);
+        }
+    }
 
     /**
      * Updates or inserts a record into the shared ChatServerRegistry registry.
@@ -122,51 +186,6 @@ public class ChatServerManager {
      */
     public void updateRecords(ChatServerRecord record) {
         registry.updateOrInsertRecord(record);
-    }
-
-
-    /**
-     * Registers a {@code ChatServer} by  persistent connection to it.
-     * <p>
-     * This method completes the provided {@code ChatServerRecord} with the resolved host address and PID,
-     * stores it in the internal registry, sends a confirmation {@code AckMessage} containing the newly
-     * registered {@code ChatServer}'s network process ID (PID), and then pushes all
-     * current {@code ChatServerRecord} entries to the newly connected chat server for synchronization.
-     * </p>
-     *
-     * @param socketChannel the socket channel for the chat server connection.
-     * @param nioChannel    the messaging channel used to communicate with the chat server.
-     * @param csPID         the process ID assigned to the chat server.
-     * @param primaryPID    the process ID of the primary AddressingServer.
-     * @param record        a partially populated record to complete and store.
-     * @throws IOException if an error occurs during message transmission.
-     */
-    public ChatServerRecord registerServer(SocketChannel socketChannel, NIOMessageChannel nioChannel, Long csPID,
-                                           Long primaryPID, ChatServerRecord record) throws IOException {
-        // InetSocketAddress remoteAddress = (InetSocketAddress) socketChannel.getRemoteAddress();
-        // String chatServerHostAddr = remoteAddress.getAddress().getHostAddress();
-
-        nioChannel.setServerPID(csPID);
-        chatServerChannels.put(socketChannel, nioChannel);
-        record.setPID(csPID);
-        // Send all current records. This helps avoid race conditions.
-        //this.sendAllChatServerRecords(primaryPID, nioChannel);
-        // Add the new record - this might not be inserted quickly enough to call the sendAll method directly after.
-        registry.putChatServerRecord(csPID, record);
-
-        System.out.println("ChatServer registered: " + record.getHostAddress() + " (PID: " + csPID + ")");
-
-        // WE SEND THE RECORD TO ALL SERVERS (THIS ONE INCLUDED) AFTER THIS METHOD RETURNS. NO NEED TO SEND IT NOW.
-
-        // Send the new record explicitly. Race conditions can occur where the hashmap doesn't update quick enough.
-        UpdateMessage<ChatServerRecord> selfUpdate =
-                UpdateMessage.csRecordPrimaryToCS(primaryPID, record);
-        nioChannel.sendMessage(selfUpdate.toJson());
-
-        // Send an ACK to notify the server it has been registered.
-        nioChannel.sendMessage(AckMessage.chatServerRegistered(primaryPID, csPID).toJson());
-
-        return record;
     }
 
 
@@ -195,7 +214,6 @@ public class ChatServerManager {
         chatServerChannels.put(socketChannel, nioChannel);
         // Update network topology storing the ChatServerRecord, thus updating the local state of the Primary
         registry.putChatServerRecord(record.getPID(), record);
-        System.out.println("New replica successfully registered within the network.");
     }
 
 
@@ -215,15 +233,16 @@ public class ChatServerManager {
     public void registerServerSendACK(SocketChannel socketChannel, NIOMessageChannel nioChannel,
                                     Long primaryPID, Long peerPID, ChatServerRecord record) throws IOException {
         nioChannel.setServerPID(peerPID);
-        chatServerChannels.put(socketChannel, nioChannel);
+        // This occurs in AddrServerNetworkManager already
+        //chatServerChannels.put(socketChannel, nioChannel);
         System.out.println("PRIMARY AddrServer has registered a new ChatServer process with network PID: " + peerPID);
         System.out.println("NIOChannel PID = " + nioChannel.getServerPID());
         System.out.println("Socket Channel ID = " + socketChannel.toString());
-
+        record.setPID(peerPID);
         registry.putChatServerRecord(peerPID, record);
-
         // Send an ACK to notify the server it has been registered.
         nioChannel.sendMessage(AckMessage.chatServerRegistered(primaryPID, peerPID).toJson());
+        System.out.println("New Chat Server successfully registered within the network.");
     }
 
     /**
@@ -270,4 +289,7 @@ public class ChatServerManager {
     }
 
 
+    public boolean hasActiveConnection(Long pid) {
+        return this.getChannelByPID(pid) != null;
+    }
 }

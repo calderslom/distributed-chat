@@ -1,6 +1,7 @@
 package io.github.cpsc559.team16.client;
 
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * A thread responsible for sending messages to the server.
@@ -78,14 +79,14 @@ public class SenderThread extends Thread {
                 if (client.isConnected()) {
                     ClientServerMessage msg = client.getMessageQueue().poll();
                     if (msg != null) {
-                        Client.debug(Client.DEBUG_DETAILED, "Retrying to send message from queue");
+                        debug(DEBUG_DETAILED, "Retrying to send message from queue");
                         client.getMessageUtils().sendMessage(msg);
                     }
                     try {
                         Thread.sleep(100);
                     } catch (InterruptedException e) {
                         if (!client.isTerminated()) {
-                            Client.debug(Client.DEBUG_NORMAL, "Sender thread interrupted");
+                            debug(DEBUG_NORMAL, "Sender thread interrupted");
                         }
                         break;
                     }
@@ -94,14 +95,14 @@ public class SenderThread extends Thread {
                         Thread.sleep(1000);
                     } catch (InterruptedException e) {
                         if (!client.isTerminated()) {
-                            Client.debug(Client.DEBUG_NORMAL, "Sender thread interrupted");
+                            debug(DEBUG_NORMAL, "Sender thread interrupted");
                         }
                         break;
                     }
                 }
             }
         } catch (Exception e) {
-            Client.debug(Client.DEBUG_NORMAL, "Sender thread error: " + e.getMessage());
+            debug(DEBUG_NORMAL, "Sender thread error: " + e.getMessage());
         } finally {
             client.getShutdownLatch().countDown();
         }

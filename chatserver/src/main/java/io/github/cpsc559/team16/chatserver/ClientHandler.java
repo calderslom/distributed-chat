@@ -11,9 +11,11 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import io.github.cpsc559.team16.common.dto.ConnectionType;
 import io.github.cpsc559.team16.common.utilities.BaseMessage;
 import io.github.cpsc559.team16.common.utilities.ChatLog;
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * Handles all incoming messages from client connections.
@@ -64,7 +66,7 @@ class ClientHandler implements ConnectionHandler {
      * while minimizing redundant updates.
      * </p>
      */
-    private static List<Integer> cachedClosestPeers = new ArrayList<>();
+    private static List<Long> cachedClosestPeers = new ArrayList<>();
 
     /**
      * Timestamp (in milliseconds) when the closest peer cache was last updated.
@@ -79,58 +81,6 @@ class ClientHandler implements ConnectionHandler {
      */
     private static final long CACHE_TTL_MS = 10_000; // 10 seconds
 
-    /**
-     * The current debug level used for controlling verbosity of logs in this
-     * handler.
-     * <p>
-     * Fetched from the environment variable {@code DEBUG_LEVEL}, with a default of
-     * {@code 5} (maximum verbosity).
-     * </p>
-     */
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    /** No debug output */
-    private static final int DEBUG_NONE = 0;
-
-    /** Log startup, shutdown, and major events */
-    private static final int DEBUG_BASIC = 1;
-
-    /** Log normal runtime operations */
-    private static final int DEBUG_NORMAL = 2;
-
-    /** Log method entry points and branching decisions */
-    private static final int DEBUG_DETAILED = 3;
-
-    /** Log byte-level I/O and internal queues */
-    private static final int DEBUG_LOW_LEVEL = 4;
-
-    /** Log everything including full message contents */
-    private static final int DEBUG_EXTREME = 5;
-
-    /**
-     * Prints a debug message if the specified level is at or below the configured
-     * {@link #DEBUG_LEVEL}.
-     * <p>
-     * Messages are prefixed with a tag indicating their severity to help filter
-     * logs.
-     * </p>
-     *
-     * @param level   the severity of the message
-     * @param message the message to log
-     */
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
 
     /**
      * Handles incoming client messages, including registration, validation, and
@@ -237,7 +187,7 @@ class ClientHandler implements ConnectionHandler {
             return;
         }
 
-        if (ctx.type == ChatServer.ConnectionType.CLIENT && ctx.username == null) {
+        if (ctx.type == ConnectionType.CLIENT && ctx.username == null) {
             try {
                 sendError("server", "ERROR: Must register username first.\n", ctx, key);
             } catch (JsonProcessingException e) {
@@ -300,7 +250,7 @@ class ClientHandler implements ConnectionHandler {
                 continue;
 
             ConnectionContext ctx = (ConnectionContext) key.attachment();
-            if (ctx.type == ChatServer.ConnectionType.CLIENT) {
+            if (ctx.type == ConnectionType.CLIENT) {
                 try {
                     WriteUtils.enqueueResponse(ctx, key, msg.toJson() + "\n");
                     selector.wakeup();
@@ -409,15 +359,15 @@ class ClientHandler implements ConnectionHandler {
      */
     public static void gossipToClosestPeers(ClientServerMessage msg, int n) {
         Selector selector = ChatServer.getSelector();
-        Map<Integer, ConnectionContext> peers = ChatServer.getConnectedPeers();
-        List<Integer> targets = getValidatedClosestPeers(n);
+        Map<Long, ConnectionContext> peers = ChatServer.getConnectedPeers();
+        List<Long> targets = getValidatedClosestPeers(n);
 
         debug(DEBUG_NORMAL, "[GOSSIP] Attempting to gossip to " + targets.size() + " closest peers.");
         int sent = 0;
 
-        for (int pid : targets) {
+        for (long pid : targets) {
             ConnectionContext ctx = peers.get(pid);
-            if (ctx == null || ctx.type != ChatServer.ConnectionType.SERVER)
+            if (ctx == null || ctx.type != ConnectionType.SERVER)
                 continue;
 
             for (SelectionKey key : selector.keys()) {
@@ -481,9 +431,9 @@ class ClientHandler implements ConnectionHandler {
      *         own PID
      */
 
-    private static List<Integer> getValidatedClosestPeers(int n) {
-        int selfPid = ChatServer.getID();
-        Map<Integer, ConnectionContext> peers = ChatServer.getConnectedPeers();
+    private static List<Long> getValidatedClosestPeers(int n) {
+        long selfPid = ChatServer.getPID();
+        Map<Long, ConnectionContext> peers = ChatServer.getConnectedPeers();
         System.out.println("peers");
         System.out.println(peers);
 
@@ -494,17 +444,17 @@ class ClientHandler implements ConnectionHandler {
 
         if (needsRefresh) {
             debug(DEBUG_DETAILED, "[GOSSIP] Refreshing cached closest peers list...");
-            List<Integer> sortedPids = new ArrayList<>(peers.keySet());
+            List<Long> sortedPids = new ArrayList<>(peers.keySet());
             sortedPids.add(selfPid);
-            sortedPids.sort(Integer::compareTo);
+            sortedPids.sort(Long::compareTo);
 
             int selfIndex = sortedPids.indexOf(selfPid);
-            List<Integer> updatedList = new ArrayList<>();
+            List<Long> updatedList = new ArrayList<>();
             int total = sortedPids.size();
 
             for (int i = 1; i < total && updatedList.size() < n; i++) {
                 int index = (selfIndex + i) % total;
-                int pid = sortedPids.get(index);
+                long pid = sortedPids.get(index);
                 if (pid != selfPid && peers.containsKey(pid)) {
                     updatedList.add(pid);
                 }

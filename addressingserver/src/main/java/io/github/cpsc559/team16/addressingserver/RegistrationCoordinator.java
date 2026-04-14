@@ -3,11 +3,15 @@ package io.github.cpsc559.team16.addressingserver;
 import java.io.IOException;
 import java.nio.channels.SocketChannel;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
+import io.github.cpsc559.team16.common.dto.ServerRecord;
 import io.github.cpsc559.team16.common.messaging.AckMessage;
 import io.github.cpsc559.team16.common.messaging.BaseAddrServerMessage;
+import io.github.cpsc559.team16.common.messaging.MessageIDGenerator;
+import io.github.cpsc559.team16.common.messaging.Roles;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
 
 /**
@@ -20,8 +24,8 @@ import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
  */
 public class RegistrationCoordinator {
 
-    /** Reference to the primary AddressingServer instance that owns this coordinator. */
-    private final AddressingServer server;
+    /** The configuration provider for server identity and network parameters. */
+    private final AddrServerConfig config;
 
     /**
      * The process responsible for managing {@code AddrServerRecord} records.
@@ -52,87 +56,90 @@ public class RegistrationCoordinator {
      */
     private final ConnectionCleanupManager cleanupManager;
 
+    /** Generates unique, monotonic message IDs for tracking network requests and ACKs. */
+    private final MessageIDGenerator genMID;
+
     /**
-     * Constructs a {@code RegistrationCoordinator} tied to a specific {@code AddressingServer}.
-     * <p>
-     * All supporting components are fetched from the server and stored for convenience.
-     *
-     * @param server the AddressingServer instance this coordinator operates within
+     * A functional provider used to issue unique Process IDs (PIDs) for newly
+     * registering nodes. This decouples the coordinator from the specific
+     * PID generation logic of the parent server.
      */
-    public RegistrationCoordinator(AddressingServer server) {
-        this.server = server;
-        this.peerManager = server.getPeerManager();
-        this.chatServerManager = server.getChatServerManager();
-        this.broadcastManager = server.getBroadcastManager();
-        this.replicaCoordinator = server.getReplicaSyncCoordinator();
-        this.cleanupManager = server.getCleanupManager();
-        this.chatServerRegistry = server.getChatServerRegistry();
-        this.addrServerRegistry = server.getAddrServerRegistry();
+    private final Supplier<Long> pidGenerator;
+
+    /**
+     * Constructs a {@code RegistrationCoordinator} with all required dependencies.
+     */
+    public RegistrationCoordinator(
+            AddrServerConfig config,
+            PeerManager peerManager,
+            ChatServerManager chatServerManager,
+            BroadcastManager broadcastManager,
+            ReplicaSyncCoordinator replicaCoordinator,
+            ConnectionCleanupManager cleanupManager,
+            ChatServerRegistry chatServerRegistry,
+            AddrServerRegistry addrServerRegistry,
+            Supplier<Long> pidGenerator,
+            MessageIDGenerator genMID) {
+        this.config = config;
+        this.peerManager = peerManager;
+        this.chatServerManager = chatServerManager;
+        this.broadcastManager = broadcastManager;
+        this.replicaCoordinator = replicaCoordinator;
+        this.cleanupManager = cleanupManager;
+        this.chatServerRegistry = chatServerRegistry;
+        this.addrServerRegistry = addrServerRegistry;
+        this.pidGenerator = pidGenerator;
+        this.genMID = genMID;
     }
 
 
 
 
     /**
-     * Handles the registration process for a newly connected {@code AddressingServer} replica.
+     * Handles the registration process for a newly connected {@code ChatServer}.
      * <p>
      * This method coordinates the following steps:
      * <ul>
-     *     <li>Assigns a new unique process ID (PID) to the incoming replica.</li>
-     *     <li>Updates the provided {@link AddrServerRecord} with the actual host address and assigned PID.</li>
-     *     <li>If this is the first replica to register (i.e., no other replicas are active), it bypasses coordination logic
-     *         and directly completes registration.</li>
-     *     <li>If other replicas exist, it triggers a synchronization event where all existing replicas must acknowledge
-     *         the update before the new replica is officially registered.</li>
-     *     <li>Creates a {@link PendingEvent} to track replica ACKs and triggers the associated completion routine once all ACKs arrive.</li>
-     *     <li>Broadcasts the updated state to all registered replicas.</li>
+     * <li>Assigns a new unique process ID (PID) to the incoming chat server.</li>
+     * <li>Updates the provided {@link ChatServerRecord} with the actual host address and assigned PID.</li>
+     * <li>Updates the nioChannel connection to the chat server with the assigned PID</li>
+     * <li>If this is the first replica to register (i.e., no other replicas are active), it bypasses coordination logic
+     * and directly completes registration.</li>
+     * <li>If other replicas exist, it triggers a synchronization event where all existing replicas must acknowledge
+     * the update before the new chat server is officially registered.</li>
+     * <li>Creates a {@link PendingEvent} to track replica ACKs and triggers the associated completion routine once all ACKs arrive.</li>
+     * <li>Broadcasts the updated state to all registered replicas.</li>
      * </ul>
      *
      * <p>
      * This ensures strong consistency in the network by requiring all replicas to synchronize their
-     * internal state before accepting the new replica into the system.
+     * internal state before accepting the new chat server into the system.
      * </p>
      *
-     * @param channel the socket connection from the registering replica
-     * @param nioChannel the message channel used to communicate with the replica
+     * @param channel the socket connection from the registering chat server
+     * @param nioChannel the message channel used to communicate with the chat server
      * @param msg the registration message containing the {@link ChatServerRecord}
      */
     public void handleChatServerRegistration(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> msg) {
-        Long primaryPID = server.getConfig().getPID();
-        Long newPID = server.generatePID();
-        
-        // Update the AddrServerRecord sent by the registering process before synchronizing with current Replicas
+        Long primaryPID = config.getPID();
+        // Check to see if the ChatServerRecord sent by the registering process contains a PID (0L signifies a new network process)
         ChatServerRecord record = msg.safeCastPayload(ChatServerRecord.class);
-//        try {
-//            record = ServerRecord.updateAddressFromSocket(channel, msg.safeCastPayload(ChatServerRecord.class), newPID);
-//        } catch (IOException e) {
-//            System.err.printf("Failed to resolve remote address for ChatServer (PID: %d). Registration aborted.%n", newPID);
-//            cleanupManager.cleanupPersistentConnection(channel, true);
-//            return;
-//        }
-        record.setPID(newPID);
-        // try {
-        //     record = ServerRecord.updateAddressFromSocket(channel, msg.safeCastPayload(ChatServerRecord.class), newPID);
-        // } catch (IOException e) {
-        //     System.err.printf("Failed to resolve remote address for ChatServer (PID: %d). Registration aborted.%n", newPID);
-        //     cleanupManager .cleanupPersistentConnection(channel, true);
-        //     return;
-        // }
-        record.setPID(newPID);
+        Long csPID = pidGenerator.get();
+        record.setPID(csPID);
         // If there are no other Replica addressing servers, register directly without coordinating with others.
         if (addrServerRegistry.getRecords().size() == 1) {
-            this.registerChatServerNoReplicasExist(primaryPID, newPID, channel, nioChannel, record);
+            this.registerChatServerNoReplicasExist(primaryPID, csPID, channel, nioChannel, record);
             return;
         } // Otherwise, initiate strong consistency: wait for ACKs from all existing replicas.
 
         // Get the list of all NIOMessage channels for registered peers (non-zero PID)
         Map<Long, NIOMessageChannel> replicaChannelMap = peerManager.getRegisteredReplicaChannelMap();
         // Set the NIOChannel PID before continuing any of the response to the request (to avoid errors when closing connections).
-        nioChannel.setServerPID(newPID);
+        nioChannel.setServerPID(csPID);
         // Create unique message ID that will be used to track ACK messages as well as the pending event.
-        long messageID = server.getMessageIDGenerator().nextID();
+        long messageID = genMID.nextID();
         // Create a new event that will trigger once all ACKs for synchronizing state have been received.
-        PendingEvent event = this.createChatServerRegistrationEvent(primaryPID, newPID, channel, nioChannel, record, replicaChannelMap, msg.getMessageID());
+        PendingEvent event = this.createChatServerRegistrationEvent(primaryPID, csPID, channel, nioChannel, record, replicaChannelMap, msg.getMessageID());
         // Add this to the list of pending events. The message ID used for replication messages is the key.
         replicaCoordinator.addPendingEvent(messageID, event);
         // Broadcast the update to all current Replicas. Any NIOChannel with PID 0 (unregistered channels) will not be included.
@@ -174,7 +181,7 @@ public class RegistrationCoordinator {
                     this.chatServerRegistry.getRecords(),
                     this.addrServerRegistry.getRecords());
             this.broadcastManager.broadcastChatServerRecordToCS(primaryPID, record);
-            this.addrServerRegistry.debugPrintAllServers();
+            this.chatServerRegistry.debugPrintAllServers();
         } catch (IOException ioe) {
             System.err.printf("IOException triggered while registering PID: %d - triggering connection cleanup.%n", newPID);
             this.cleanupManager.cleanupPersistentConnection(channel, true);
@@ -184,9 +191,9 @@ public class RegistrationCoordinator {
 
 
     /**
-     * Creates a {@link PendingEvent} representing the registration of a new replica with the primary {@code AddressingServer}.
+     * Creates a {@link PendingEvent} representing the registration of a new chat server with the primary {@code AddressingServer}.
      * <p>
-     * This event sends an initial acknowledgment message to the new replica and tracks acknowledgments from
+     * This event sends an initial acknowledgment message to the new chat server and tracks acknowledgments from
      * all currently registered replicas. The event is considered complete once all required ACKs are received.
      * </p>
      *
@@ -194,20 +201,20 @@ public class RegistrationCoordinator {
      * Once the event is complete, the following actions are performed in sequence:
      * </p>
      * <ul>
-     *     <li>The new replica is formally added to the list of active NIOChannels in {@link PeerManager}.</li>
-     *     <li>The new replica record is added to set of {@link AddrServerRecord} in {@link AddrServerRegistry}.</li>
-     *     <li>The full set of chat server and addressing server records are sent to the new replica.</li>
-     *     <li>The new replica's {@link AddrServerRecord} is broadcast to all connected chat servers.</li>
-     *     <li>The updated address server registry is printed for debugging purposes.</li>
+     * <li>The new chat server is formally added to the list of active NIOChannels in {@link ChatServerManager}.</li>
+     * <li>The new chat server record is added to set of {@link ChatServerRecord} in {@link ChatServerRegistry}.</li>
+     * <li>The full set of chat server and addressing server records are sent to the new chat server.</li>
+     * <li>The new chat server's {@link ChatServerRecord} is broadcast to all connected chat servers.</li>
+     * <li>The updated chat server registry is printed for debugging purposes.</li>
      * </ul>
      *
      * <p>
      * This method encapsulates the full coordination logic required to safely and consistently register
-     * a replica across a distributed system, ensuring that all participating replicas are aware of the new node.
+     * a chat server across a distributed system, ensuring that all participating replicas are aware of the new node.
      * </p>
      *
      * @param primaryPID  the PID of the primary {@code AddressingServer}
-     * @param newPID      the PID assigned to the newly registering replica
+     * @param newPID      the PID assigned to the newly registering chat server
      * @param channel     the {@link SocketChannel} associated with the requester
      * @param nioChannel  the {@link NIOMessageChannel} used to communicate with the requester
      * @param record      the {@link ChatServerRecord} received from the registering process.
@@ -239,7 +246,7 @@ public class RegistrationCoordinator {
                     } catch (IOException e) {
                         System.err.printf("IOException triggered while registering PID: %d - triggering connection cleanup.%n", newPID);
                         // An error occurred while trying to sync the new ChatServer's state. Remove it from the network.
-                        this.server.getCleanupManager().cleanupPersistentConnection(channel, true);
+                        cleanupManager.cleanupPersistentConnection(channel, true);
                     }
                 },
                 3, requestMessageID
@@ -300,7 +307,7 @@ public class RegistrationCoordinator {
                     } catch (IOException e) {
                         System.err.printf("IOException triggered while registering PID: %d - triggering connection cleanup.%n", newPID);
                         // An error occurred while trying to sync the new Replicas state. Remove it from the network.
-                        this.server.getCleanupManager().cleanupPersistentConnection(channel, true);
+                        cleanupManager.cleanupPersistentConnection(channel, true);
                     }
                 },
                 3, requestMessageID
@@ -315,6 +322,7 @@ public class RegistrationCoordinator {
      *     <li>Registers the replica with the {@link PeerManager}, sending an acknowledgment (ACK) back to confirm registration.</li>
      *     <li>Sends all known chat server and address server records from the primary to the new replica
      *         using the {@link BroadcastManager} to synchronize state.</li>
+     *     <li>Updates the nioChannel connection to the replica with the assigned PID</li>
      *     <li>Broadcasts the newly registered replica’s {@link AddrServerRecord} to all connected chat servers
      *         so they are aware of the updated network state.</li>
      *     <li>Prints the current address server registry to the console for debugging purposes.</li>
@@ -356,6 +364,7 @@ public class RegistrationCoordinator {
      *     <li>Updates the provided {@link AddrServerRecord} with the actual host address and assigned PID.</li>
      *     <li>If this is the first replica to register (i.e., no other replicas are active), it bypasses coordination logic
      *         and directly completes registration.</li>
+     *     <li>Updates the nioChannel connection to the replica with the assigned PID</li>
      *     <li>If other replicas exist, it triggers a synchronization event where all existing replicas must acknowledge
      *         the update before the new replica is officially registered.</li>
      *     <li>Creates a {@link PendingEvent} to track replica ACKs and triggers the associated completion routine once all ACKs arrive.</li>
@@ -373,17 +382,10 @@ public class RegistrationCoordinator {
      */
     public void handleReplicaRegistration(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> msg)
     {
-        Long primaryPID = server.getConfig().getPID();
-        Long newPID = server.generatePID();
+        Long primaryPID = config.getPID();
+        Long newPID = pidGenerator.get();
         // Update the AddrServerRecord sent by the registering process before synchronizing with current Replicas
         AddrServerRecord record = msg.safeCastPayload(AddrServerRecord.class);
-        // try {
-        //     record = ServerRecord.updateAddressFromSocket(channel, msg.safeCastPayload(AddrServerRecord.class), newPID);
-        // } catch (IOException e) {
-        //     System.err.printf("Failed to resolve remote address for replica (PID: %d). Registration aborted.%n", newPID);
-        //     cleanupManager.cleanupPersistentConnection(channel, true);
-        //     return;
-        // }
         record.setPID(newPID);
         // If this is the first and only replica, register directly without coordinating with others.
         if (addrServerRegistry.getRecords().size() == 1) {
@@ -396,7 +398,7 @@ public class RegistrationCoordinator {
         // Set the NIOChannel PID before continuing any of the response to the request (to avoid errors when closing connections).
         nioChannel.setServerPID(newPID);
         // Create unique message ID that will be used to track ACK messages as well as the pending event.
-        long messageID = server.getMessageIDGenerator().nextID();
+        long messageID = genMID.nextID();
         // Create a new event that will trigger once all ACKs for synchronizing state have been received.
         PendingEvent event = this.createReplicaRegistrationEvent(primaryPID, newPID, channel, nioChannel, record, replicaChannelMap, msg.getMessageID());
         // Add this to the list of pending events. The message ID used for replication messages is the key.
@@ -404,4 +406,104 @@ public class RegistrationCoordinator {
         // Broadcast the update to all current Replicas. Any NIOChannel with PID 0 (unregistered channels) will not be included.
         broadcastManager.broadcastASRecordToReplicas(messageID, primaryPID, record, event);
     }
+
+    /**
+     * Handles the synchronization process for a REPLICA that already has an identity.
+     * This ensures all other Replicas update their view of this peer's socket/state.
+     */
+    public void handleReplicaSynchronization(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> msg) {
+        // TODO: currently, this method assumes the PID received can only belong to one process.
+        //  As such, it does not check to see if an NIOMessage channel already exists with that PID.
+        //  In the future, if we add reconnection logic (rather than removing a disconnected server and its record) we can update this method.
+        AddrServerRecord record = msg.safeCastPayload(AddrServerRecord.class);
+        Long replicaPID = record.getPID();
+        // Check to see if the process attempting to synchronize is registered (internal record matches the received record).
+        if (!this.addrServerRegistry.validateReplicaIdentity(record)) {
+            System.err.printf("[%tT] [SYNCHRONIZE ERROR] Replica PID %d mismatch detected.%n", java.time.LocalTime.now(), replicaPID);
+            // TODO: tell the contacting REPLICA to delete it's internal records and reconnect with a REGISTER message.
+            cleanupManager.cleanupPersistentConnectionNIO(nioChannel, false);
+        }
+        else { // The record received matches the internal record.
+            // We must now link the NIOChannel with this REPLICA by setting it's PID.
+            nioChannel.setServerPID(replicaPID);
+            // Add the channel to PeerManager since it is a persistent connection.
+            peerManager.getPeerChannels().put(channel, nioChannel);
+            Long primaryPID = config.getPID();
+            try {
+                System.out.printf("Synchronization for PID %d confirmed, sending ACK.%n", replicaPID);
+                nioChannel.sendMessage(AckMessage.replicaRegistered(primaryPID, replicaPID).toJson());
+            } catch (IOException e) {
+                cleanupManager.cleanupPersistentConnection(channel, true);
+            }
+        }
+    }
+
+    /**
+     * Executes the synchronization handshake for a server that already possesses a network identity.
+     * <p>
+     * This method facilitates "Self-Healing" of the distributed system by allowing a previously
+     * registered process to re-establish its connection (e.g. after a failover or network flicker).
+     * It performs the following critical steps:
+     * <ul>
+     * <li><b>Validation:</b> Verifies the provided {@link ServerRecord} against the local registry
+     * to ensure the PID and topology match the known state.</li>
+     * <li><b>Identity Binding:</b> Associates the new {@link NIOMessageChannel} with the
+     * remote process's PID to enable stateful tracking.</li>
+     * <li><b>Promotion:</b> Migrates the channel into the active connection map (PeerManager
+     * or ChatServerManager) based on the specific server role.</li>
+     * <li><b>Acknowledgment:</b> Issues a synchronization ACK to the remote process to
+     * confirm the identity has been successfully re-bound.</li>
+     * </ul>
+     * </p>
+     *
+     * @param channel    the raw {@link SocketChannel} from the remote process.
+     * @param nioChannel the {@link NIOMessageChannel} being promoted to an active state.
+     * @param msg        the base message containing the {@link ServerRecord} payload.
+     * @param role       the architectural role of the sender, determining which registry and
+     * manager are used for validation and mapping.
+     */
+    public void synchronizeServer(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> msg, String role) {
+        boolean isValidIdentity = false;
+        ServerRecord record = null;
+        if (role.equals(Roles.CHATSERVER)) {
+            record = msg.safeCastPayload(ChatServerRecord.class);
+            isValidIdentity = this.chatServerRegistry.validateChatServerIdentity((ChatServerRecord) record);
+        }
+        else {
+            record = msg.safeCastPayload(AddrServerRecord.class);
+            isValidIdentity = this.addrServerRegistry.validateReplicaIdentity((AddrServerRecord) record);
+        }
+
+        Long targetPID = record.getPID();
+        // Check to see if the process attempting to synchronize is registered (internal record matches the received record).
+        if (!isValidIdentity) {
+            System.err.printf("[%tT] [SYNCHRONIZE ERROR] PID %d mismatch detected.%n", java.time.LocalTime.now(), targetPID);
+            // TODO: tell the remote process to delete it's internal records and reconnect with a REGISTER message.
+            cleanupManager.cleanupPersistentConnectionNIO(nioChannel, false);
+        }
+        else { // The record received matches the internal record.
+            // We must now associate this NIOChannel with the remote process that is synchronizing.
+            nioChannel.setServerPID(targetPID);
+            Long primaryPID = config.getPID();
+            AckMessage<Long> ackMessage;
+            if (role.equals(Roles.CHATSERVER)) {
+                chatServerManager.getChannels().put(channel, nioChannel);
+                ackMessage = AckMessage.chatServerSynchronized(genMID.nextID(), primaryPID, targetPID);
+                System.out.printf("Synchronization with ChatServer (PID %d) confirmed, sending ACK.%n", targetPID);
+            }
+            else {
+                // Add the channel to PeerManager since it is a persistent connection.
+                peerManager.getPeerChannels().put(channel, nioChannel);
+                ackMessage = AckMessage.replicaSynchronized(genMID.nextID(), primaryPID, targetPID);
+                System.out.printf("Synchronization with REPLICA (PID %d) confirmed, sending ACK.%n", targetPID);
+            }
+            try {
+                nioChannel.sendMessage(ackMessage.toJson());
+            } catch (IOException e) {
+                cleanupManager.cleanupPersistentConnection(channel, true);
+            }
+        }
+    }
+
+
 }

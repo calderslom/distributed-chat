@@ -14,10 +14,6 @@ import io.github.cpsc559.team16.common.exceptions.ChatServerFullException;
  */
 public class ChatServerRecord extends ServerRecord {
 
-    /**
-     * The port used for connections with the addressing server.
-     */
-    private final int addrServerPort;
 
     /**
      * The maximum number of client connections allowed for this server instance.
@@ -50,9 +46,6 @@ public class ChatServerRecord extends ServerRecord {
      */
     private ServerStatus status;
 
-    public int getAddrServerPort() {
-        return this.addrServerPort;
-    }
 
     public int getClientCount() {
         return this.clientCount;
@@ -76,8 +69,6 @@ public class ChatServerRecord extends ServerRecord {
      * @param clientPort     The port used for communication with client processes.
      * @param peerPort       The port used for peer-to-peer communication with other
      *                       chat servers.
-     * @param addrServerPort The port used for communication with the addressing
-     *                       server.
      * @param maxClientCount The maximum amount of persistent client connections
      *                       this server should be assigned.
      */
@@ -87,7 +78,6 @@ public class ChatServerRecord extends ServerRecord {
             @JsonProperty("hostAddress") String hostAddress,
             @JsonProperty("clientPort") int clientPort,
             @JsonProperty("peerPort") int peerPort,
-            @JsonProperty("addrServerPort") int addrServerPort,
             @JsonProperty("maxClientCount") int maxClientCount) {
         /*
          * `serverID` is used as a key for the key:value pairs that make up the unified
@@ -95,7 +85,6 @@ public class ChatServerRecord extends ServerRecord {
          * ChatServerRecord HashMap of records kept by Addressing Servers.
          */
         super(serverID, hostAddress, peerPort, clientPort);
-        this.addrServerPort = addrServerPort;
         this.clientCount = 0;
         this.maxClientCount = maxClientCount;
         this.status = ServerStatus.ACTIVE;

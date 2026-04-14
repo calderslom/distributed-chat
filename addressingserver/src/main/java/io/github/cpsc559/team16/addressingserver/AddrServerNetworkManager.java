@@ -15,11 +15,14 @@ import java.util.function.Supplier;
 
 import io.github.cpsc559.team16.common.dto.ServerRole;
 import io.github.cpsc559.team16.common.exceptions.ConnectionClosedException;
+import io.github.cpsc559.team16.common.logging.DebugLogger;
 import io.github.cpsc559.team16.common.messaging.BaseAddrServerMessage;
 import static io.github.cpsc559.team16.common.messaging.MessageDeserializer.deserializeMessage;
 import io.github.cpsc559.team16.common.messaging.MessageTypes;
 import io.github.cpsc559.team16.common.messaging.Roles;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
+
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * Manages the network interactions for the AddressingServer.
@@ -41,7 +44,7 @@ public class AddrServerNetworkManager {
      * is used by the
      * {@link AddrServerNetworkManager} to detect whether a controlled shutdown or
      * restart has been
-     * requested (e.g., in response to a restart message or failure condition).
+     * requested (e.g. in response to a restart message or failure condition).
      * </p>
      * <p>
      * When set to {@code true}, the main network event loop will
@@ -59,6 +62,15 @@ public class AddrServerNetworkManager {
      */
     public void requestShutdown() {
         this.shutdownRequested = true;
+        if (this.selector != null) {
+            this.selector.wakeup(); // Interrupts the blocking select() immediately so the thread is not waiting for a connection.
+        }
+    }
+
+    private volatile boolean midElection = false;
+
+    public void setMidElection(boolean running) {
+        this.midElection = running;
     }
 
     /**
@@ -202,16 +214,40 @@ public class AddrServerNetworkManager {
         this.replicaRequestCoordinator = this.replicaRequestFactory.get();
     }
 
+    /** Supplier for the coordinator class that handles requests sent by REPLICA processes to the PRIMARY */
     private final Supplier<ReplicaRequestCoordinator> replicaRequestFactory;
 
+    /**
+     * Terminate the {@link ReplicaRequestCoordinator} background thread and cleans up its reference.
+     * <p>
+     * This method signals the coordinator to stop, interrupts its current sleep or network operation,
+     * and attempts to join the thread for up to 2 seconds to ensure a graceful exit. Once the
+     * thread has terminated (or the timeout is reached), the local reference is nullified to
+     * prevent stale interactions and allow for garbage collection.
+     * </p>
+     * <p>
+     * This is primarily used when a {@code REPLICA} is promoted to {@code PRIMARY}, as a primary
+     * server should not attempt to synchronize state with itself.
+     * </p>
+     */
     public void shutdownCoordinatorRequest() {
-        if (this.replicaRequestCoordinator != null && this.replicaRequestCoordinator.isAlive()) {
+        if (this.replicaRequestCoordinator != null) {
             this.replicaRequestCoordinator.shutdown();
             try {
-                this.replicaRequestCoordinator.join();
+                // Wait up to 2 seconds for the thread to die gracefully
+                this.replicaRequestCoordinator.join(2000);
+
+                if (this.replicaRequestCoordinator.isAlive()) {
+                    // We use an interrupt in repilcaRequestCoordinator.shutdown to wake it up,
+                    // so if it is still alive here we must dereference it.
+                    System.err.println("WARNING: ReplicaRequestCoordinator did not terminate within 2s." +
+                            "Proceeding with nullification to avoid blocking the main thread.");
+                }
             } catch (InterruptedException e) {
+                System.err.println("Main event loop interrupted while waiting for replica request coordinator thread to die:" + e.getMessage());
                 Thread.currentThread().interrupt();
-                System.err.println("Interrupted while waiting for ReplicaRequestCoordinator to finish.");
+            } finally {
+                this.replicaRequestCoordinator = null;
             }
         }
     }
@@ -289,33 +325,42 @@ public class AddrServerNetworkManager {
     }
 
     /**
-     * Opens and binds a ServerSocketChannel to the specified port.
+     * Opens and binds a {@code ServerSocketChannel} to the specified port for a specific role.
      * <p>
-     * This method is used to create a listener channel that monitors incoming
-     * connection requests on a given port. The channel is set to non-blocking mode,
-     * allowing it to be used with a Selector for persistent asynchronous I/O
-     * operations.
+     * This method initializes the channel in non-blocking mode and registers it with the
+     * internal {@code Selector} for {@code OP_ACCEPT} events. The provided {@code connectionRole}
+     * is attached to the {@code SelectionKey} for later identification during the event loop.
      * </p>
      *
-     * @param port The port number to bind the channel to.
-     * @return The opened ServerSocketChannel.
-     * @throws IOException If an error occurs while opening or binding the channel.
+     * @param port           the port number to bind the channel to
+     * @param connectionRole a descriptive string (e.g., Roles.CHATSERVER) identifying the channel's purpose
+     * @return the opened and registered {@code ServerSocketChannel}
+     * @throws IOException if an error occurs during opening, binding, or registration
      */
-
-    public ServerSocketChannel openListenerChannel(int port) throws IOException {
+    public ServerSocketChannel openListenerChannel(int port, String connectionRole) throws IOException {
         try {
             ServerSocketChannel channel = ServerSocketChannel.open();
+
+            // Ensure the selector is not blocked during registration
             selector.wakeup();
+
             channel.configureBlocking(false);
             channel.socket().bind(new InetSocketAddress(port));
-            channel.register(selector, SelectionKey.OP_ACCEPT);
-            System.out.println("Listener channel opened on port " + port);
+
+            // Register the channel and ATTACH the role string to the SelectionKey
+            // NOTE: this will be replaced by an NIOChannel in the main event loop on the server channels
+            channel.register(selector, SelectionKey.OP_ACCEPT, connectionRole);
+
+            DebugLogger.debug(DEBUG_BASIC, connectionRole + " listener channel opened on port " + port);
+
             return channel;
         } catch (IOException e) {
-            System.err.println("Failed to open listener channel on port " + port + ": " + e.getMessage());
+            DebugLogger.debug(DEBUG_BASIC, "Failed to open " + connectionRole + " listener channel on port " + port + ": " + e.getMessage());
             throw e;
         }
     }
+
+
 
     /**
      * Opens all listener channels required for normal operation and health
@@ -339,10 +384,10 @@ public class AddrServerNetworkManager {
      */
     public void openListenerChannels(int clientPort, int peerPort, int chatServerPort) throws IOException {
         try {
-            openListenerChannel(clientPort);
-            this.peerListenerChannel = openListenerChannel(peerPort);
-            this.chatServerListenerChannel = openListenerChannel(chatServerPort);
-            this.healthCheckListenerChannel = openListenerChannel(5050); // static port for health checks
+            openListenerChannel(clientPort, Roles.CLIENT);
+            this.peerListenerChannel = openListenerChannel(peerPort, Roles.REPLICA);
+            this.chatServerListenerChannel = openListenerChannel(chatServerPort, Roles.CHATSERVER);
+            this.healthCheckListenerChannel = openListenerChannel(5050, "HEALTH_CHECK"); // static port for health checks
         } catch (IOException e) {
             System.err.println("Failed to open a listener channel. Exiting main event loop.");
             throw e; // Throw the error so we can catch it in the main method of AddressingServer and
@@ -378,6 +423,20 @@ public class AddrServerNetworkManager {
 
     public Selector getSelector() {
         return selector;
+    }
+
+    /**
+     *
+     * @param message
+     * @return
+     */
+    public boolean isSupportedMessageType(BaseAddrServerMessage<?> message) {
+        return switch (message.getMsgType()) {
+            case MessageTypes.REGISTER,
+                    MessageTypes.ELECTION,
+                    MessageTypes.SYNCHRONIZE -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -444,9 +503,9 @@ public class AddrServerNetworkManager {
                 eventWatchdog.start();
             }
 
-            if (config.getRole().equals(ServerRole.REPLICA)) {
+            if (config.getRole().equals(ServerRole.REPLICA) && !this.midElection) {
                 if (replicaRequestCoordinator != null && !replicaRequestCoordinator.isAlive()) {
-                    System.err.println("ReplicaRequestCoordinator thread is not alive. Restarting...");
+                    System.err.println("ReplicaRequestCoordinator is missing or dead. Starting new instance...");
                     createReplicaRequestCoordinator();
                     replicaRequestCoordinator.start();
                 }
@@ -475,9 +534,10 @@ public class AddrServerNetworkManager {
                         if (channel == null)
                             continue;
 
-                        channel.configureBlocking(false); // switched to non-blocking
+                        channel.configureBlocking(false);
 
-                        if (listenerSC.equals(healthCheckListenerChannel)) {
+                        // Use the attachment to identify the "HEALTH_CHECK" role
+                        if ("HEALTH_CHECK".equals(key.attachment())) {
                             try {
                                 String response = this.config.getPID() + "\n";
                                 ByteBuffer buffer = ByteBuffer.wrap(response.getBytes());
@@ -485,15 +545,17 @@ public class AddrServerNetworkManager {
                                     channel.write(buffer);
                                 }
                                 channel.close();
+                                DebugLogger.debug(DEBUG_EXTREME, "PONG - responded to Health Check...");
                             } catch (IOException e) {
-                                System.err.println("Failed to respond to ping: " + e.getMessage());
+                                DebugLogger.debug(DEBUG_BASIC, "Failed to respond to ping: " + e.getMessage());
                             }
                             continue;
                         }
 
                         NIOMessageChannel nioChannel = new NIOMessageChannel(channel);
-                        channel.register(selector, SelectionKey.OP_READ, nioChannel); // attach nioChannel for handshake
-                        selector.wakeup(); // ensure the selector sees the new registration
+                        // Attach nioChannel to the new SocketChannel's key for the handshake phase
+                        channel.register(selector, SelectionKey.OP_READ, nioChannel);
+                        selector.wakeup();
                     }
 
                     else if (key.isReadable()) {
@@ -516,9 +578,8 @@ public class AddrServerNetworkManager {
                                 }
 
                                 BaseAddrServerMessage<?> message = deserializeMessage(firstMsg);
-                                if (message == null || (!message.getMsgType().equals(MessageTypes.REGISTER) &&
-                                        !message.getMsgType().equals(MessageTypes.ELECTION))) {
-                                    System.err.println("Rejected: initial message must be REGISTER or ELECTION.");
+                                if (message == null || !isSupportedMessageType(message)) {
+                                    System.err.println("Rejected: initial message must be REGISTER, SYNCHRONIZE, or ELECTION.");
                                     channel.close();
                                     key.cancel();
                                     continue;
@@ -531,16 +592,31 @@ public class AddrServerNetworkManager {
                                     continue;
                                 }
 
-                                if (message.getSenderRole().equals(Roles.CHATSERVER)) {
+                                String senderRole = message.getSenderRole();
+                                // Open persistent connection and hand it to the manager class.
+                                if (senderRole.equals(Roles.CHATSERVER)) {
                                     openPersistentChannel(channel); // will register with selector
                                     cleanupManager.getChatServerManager().getChannels().put(channel, nioChannel);
-                                } else if (message.getSenderRole().equals(Roles.REPLICA)) {
+                                } else if (senderRole.equals(Roles.REPLICA)) {
                                     openPersistentChannel(channel);
                                     cleanupManager.getPeerManager().getChannels().put(channel, nioChannel);
                                 }
 
                                 try {
-                                    readDispatcher.handleRegistration(channel, nioChannel, message);
+                                    // If synchronization fails, the persistent connection that was just opened is closed.
+                                    // The persistent connection (NIO socket) does not contain a unique PID until
+                                    // it is assigned during registration or synchronization.
+                                    if (message.getMsgType().equals(MessageTypes.SYNCHRONIZE)) {
+                                        if (senderRole.equals(Roles.CHATSERVER)) {
+                                            readDispatcher.handleSynchronizationRequest(channel, nioChannel, message, Roles.CHATSERVER);
+                                        } else if (senderRole.equals(Roles.REPLICA)) {
+                                            readDispatcher.handleSynchronizationRequest(channel, nioChannel, message, Roles.REPLICA);
+                                        }
+                                        else { System.err.println("Received SYNCHRONIZE request from a process with an unrecognized role."); }
+                                    }
+                                    else {
+                                        readDispatcher.handleRegistration(channel, nioChannel, message);
+                                    }
                                     if (!cleanupManager.isPersistentConnection(channel)) {
                                         channel.close();
                                         key.cancel();

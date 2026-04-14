@@ -12,9 +12,11 @@ import java.util.Optional;
 public class ClientManager {
 
     private ChatServerRegistry registry;
+    private final ChatServerManager chatServerManager;
 
-    public ClientManager(ChatServerRegistry registry) {
+    public ClientManager(ChatServerRegistry registry, ChatServerManager chatServerManager) {
         this.registry = registry;
+        this.chatServerManager = chatServerManager;
     }
 
     /**
@@ -28,7 +30,9 @@ public class ClientManager {
         return registry.getRecords().values().stream()
                 .peek(server -> System.out.printf("Checking server PID %d — Status: %s, ClientCount: %d, isFull: %b%n",
                         server.getPID(), server.getStatus(), server.getClientCount(), server.isFull()))
-                .filter(server -> server.getStatus() == ChatServerRecord.ServerStatus.ACTIVE && !server.isFull())
+                .filter(server -> server.getStatus() == ChatServerRecord.ServerStatus.ACTIVE
+                        && !server.isFull()
+                        && chatServerManager.hasActiveConnection(server.getPID()))
                 .findFirst()
                 .flatMap(server -> {
                     int previousCount = server.getClientCount();
@@ -51,6 +55,9 @@ public class ClientManager {
 
     /**
      * Sends an ACK message to the client with the available ChatServer info.
+     *
+     * When a client connects to the network for the first time, or loses its connection to a chat server,
+     * it automatically contacts the Addressing Server to request the address of an available chat server.
      *
      * @param primaryPID the PID of the Addressing Server
      * @param nioChannel the channel to send the ACK on

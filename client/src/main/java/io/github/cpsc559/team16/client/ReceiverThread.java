@@ -8,6 +8,7 @@ import java.util.Set;
 
 import io.github.cpsc559.team16.common.utilities.BaseMessage;
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * A thread responsible for receiving messages from the server.
@@ -91,12 +92,12 @@ public class ReceiverThread extends Thread {
                     if (client.isConnected()) {
                         String serializedMsg = client.getIn().readLine();
                         if (serializedMsg == null) {
-                            Client.debug(Client.DEBUG_NORMAL, "Connection closed by server");
+                            debug(DEBUG_NORMAL, "Connection closed by server");
                             client.getConnectionManager().reconnect();
                             continue;
                         }
 
-                        Client.debug(Client.DEBUG_LOW_LEVEL, "Received message: " + serializedMsg);
+                        debug(DEBUG_LOW_LEVEL, "Received message: " + serializedMsg);
                         ClientServerMessage msg = BaseMessage.fromJson(serializedMsg, ClientServerMessage.class);
 
                         synchronized (client.getMessageLock()) {
@@ -107,7 +108,7 @@ public class ReceiverThread extends Thread {
                             if (waitingForHistory) {
                                 // Handle message history response
                                 if (msg.getCommand().equals("HISTORY_RESPONSE")) {
-                                    Client.debug(Client.DEBUG_DETAILED, "Processing HISTORY_RESPONSE");
+                                    debug(DEBUG_DETAILED, "Processing HISTORY_RESPONSE");
                                     String[] lines = msg.getContent().split("\n");
                                     for (String line : lines) {
                                         if (line.isBlank())
@@ -120,7 +121,7 @@ public class ReceiverThread extends Thread {
                                             client.getMsgLog().add(historicMsg);
                                             client.getDisplayLog().add(historicMsg);
                                         } catch (Exception ex) {
-                                            Client.debug(Client.DEBUG_NORMAL,
+                                            debug(DEBUG_NORMAL,
                                                     "Failed to parse message from history: " + ex.getMessage());
                                         }
                                     }
@@ -140,14 +141,13 @@ public class ReceiverThread extends Thread {
 
                                 // If history not yet received, buffer messages
                                 if (!historyReceived) {
-                                    Client.debug(Client.DEBUG_DETAILED,
+                                    debug(DEBUG_DETAILED,
                                             "Buffering message while waiting for history: " + msg.getMessageId());
                                     bufferedMessages.add(msg);
                                     continue;
                                 }
                             }
                             if (msg.getCommand().equals("REGISTER")) {
-                                Client.debug(Client.DEBUG_BASIC, "Successfully registered with username: " + msg.getSender());
                                 client.getAwaitingAck()
                                         .removeIf(pendingMsg -> pendingMsg.getMessageId().equals(msg.getMessageId()));
 
@@ -157,7 +157,7 @@ public class ReceiverThread extends Thread {
 
                                     // Add a success message to both logs
                                     ClientServerMessage successMsg = new ClientServerMessage("System", "all", -1,
-                                            "Successfully registered with username: " + msg.getSender());
+                                            "Username: " + msg.getSender() + "\n-------------------\n");
                                     successMsg.setCommand("INFO");
                                     client.getMsgLog().add(successMsg);
                                     if (!displayedMessageIds.contains(successMsg.getMessageId())) {
@@ -169,12 +169,12 @@ public class ReceiverThread extends Thread {
                                             "10");
                                     historyRequest.setCommand("HISTORY");
                                     client.getMessageUtils().sendMessage(historyRequest);
-                                    Client.debug(Client.DEBUG_DETAILED, "Requested message history after registration");
+                                    debug(DEBUG_DETAILED, "Requested message history after registration");
 
                                     waitingForHistory = true;
                                 }
                             } else if (msg.getSender().equals(client.getUsername())) {
-                                Client.debug(Client.DEBUG_DETAILED, "Message acknowledged by server");
+                                debug(DEBUG_DETAILED, "Message acknowledged by server");
                                 client.getMsgLog().add(msg);
                                 client.getPendingMessages().remove(msg.getMessageId());
                                 client.getAwaitingAck()
@@ -186,6 +186,7 @@ public class ReceiverThread extends Thread {
                                     displayedMessageIds.add(msg.getMessageId());
                                 }
                             } else {
+                                debug(DEBUG_BASIC, "Received chat message from " + msg.getSender());
                                 client.getMsgLog().add(msg);
                                 if (!displayedMessageIds.contains(msg.getMessageId())) {
                                     client.getDisplayLog().add(msg);
@@ -198,14 +199,14 @@ public class ReceiverThread extends Thread {
                             Thread.sleep(1000);
                         } catch (InterruptedException e) {
                             if (!client.isTerminated()) {
-                                Client.debug(Client.DEBUG_NORMAL, "Receiver thread interrupted");
+                                debug(DEBUG_NORMAL, "Receiver thread interrupted");
                             }
                             break;
                         }
                     }
                 }
             } catch (Exception e) {
-                Client.debug(Client.DEBUG_NORMAL, "Receiver thread error: " + e.getMessage());
+                debug(DEBUG_NORMAL, "Receiver thread error: " + e.getMessage());
             } finally {
                 client.getShutdownLatch().countDown();
             }

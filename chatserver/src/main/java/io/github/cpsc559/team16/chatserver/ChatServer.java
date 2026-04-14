@@ -4,24 +4,23 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.net.SocketAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.channels.*;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ConcurrentHashMap;
 
-import io.github.cpsc559.team16.common.messaging.RegisterMessage;
-import io.github.cpsc559.team16.common.messaging.NotificationMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
+import io.github.cpsc559.team16.common.dto.ConnectionType;
+import io.github.cpsc559.team16.common.dto.PrimaryAddress;
+import io.github.cpsc559.team16.common.messaging.*;
+import io.github.cpsc559.team16.common.utilities.*;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -29,13 +28,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
-import io.github.cpsc559.team16.common.messaging.BaseAddrServerMessage;
-import io.github.cpsc559.team16.common.messaging.MessageDeserializer;
-import io.github.cpsc559.team16.common.messaging.RegisterMessage;
-import io.github.cpsc559.team16.common.utilities.BaseMessage;
-import io.github.cpsc559.team16.common.utilities.ChatLog;
-import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
-import io.github.cpsc559.team16.common.utilities.ServerServerMessage;
 
 /**
  * The main ChatServer class implements a non-blocking I/O chat server that:
@@ -51,86 +43,6 @@ import io.github.cpsc559.team16.common.utilities.ServerServerMessage;
 // @SuppressWarnings("unused")
 public class ChatServer {
 
-    /**
-     * The current debug level for controlling verbosity of server logs.
-     * <p>
-     * This is configurable at runtime using the environment variable
-     * <b>DEBUG_LEVEL</b>.
-     * If the environment variable is not set, the default level is
-     * {@code DEBUG_EXTREME} (5),
-     * meaning all debug messages will be printed.
-     * </p>
-     * <p>
-     * Example usage in shell to reduce output to basic info only:
-     *
-     * <pre>{@code
-     * export DEBUG_LEVEL=1
-     * }</pre>
-     * </p>
-     */
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "5"));
-
-    // Debug level constants
-
-    /**
-     * Debug level: No debug output. Use in production mode where logs are minimal.
-     */
-    private static final int DEBUG_NONE = 0; // No debug output (production mode)
-
-    /**
-     * Debug level: Basic events such as startup, shutdown, and major transitions.
-     */
-    private static final int DEBUG_BASIC = 1; // Basic info: startup, shutdown, major events
-
-    /**
-     * Debug level: Normal runtime activity such as new connections or message
-     * processing.
-     */
-    private static final int DEBUG_NORMAL = 2; // Normal operation details: connections, requests
-
-    /**
-     * Debug level: Step-by-step logic, including function entry points and internal
-     * decisions.
-     */
-    private static final int DEBUG_DETAILED = 3; // Detailed flow: entering methods, decision points
-
-    /**
-     * Debug level: Low-level I/O activity like byte reads/writes and selector
-     * state.
-     */
-    private static final int DEBUG_LOW_LEVEL = 4; // Low-level operations: byte-level I/O, parsing
-
-    /**
-     * Debug level: Maximum verbosity including every possible detail.
-     * Useful for diagnosing edge cases or unexpected behavior.
-     */
-    private static final int DEBUG_EXTREME = 5; // Extreme detail: everything, for deep debugging
-
-    /**
-     * Logs a debug message to standard output if the message level is
-     * less than or equal to the configured {@link #DEBUG_LEVEL}.
-     * <p>
-     * Each message is prefixed with a tag representing its severity.
-     * This helps developers visually filter relevant messages while debugging.
-     * </p>
-     *
-     * @param level   the severity level of the message (0–5)
-     * @param message the message to log
-     */
-
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + message);
-        }
-    }
 
     /**
      * Path to the file that stores the persistent chat log.
@@ -157,22 +69,36 @@ public class ChatServer {
      * Unique identifier (PID) assigned to this chat server by the Addressing
      * Server.
      */
-    private static int ID;
+    private static volatile long PID;
+
+    private static final MessageIDGenerator msgIDGenerator = new MessageIDGenerator(() -> ChatServer.PID);
 
     /**
-     * Host address of the Addressing Server, retrieved from the environment
-     * variable
-     * {@code ADDRESS_SERVER_IP}. Defaults to {@code 127.0.0.1} if not set.
+     * Host address of the Addressing Server.
+     * Retrieved dynamically using the {@link PrimaryDiscoveryReader}
      */
-    private static final String ADDRESSING_SERVER_HOST = System.getenv().getOrDefault("ADDRESS_SERVER_IP", "127.0.0.1");
+    private static volatile String primaryHostAddress;
 
     /**
-     * Port on which the Addressing Server is listening.
-     * Retrieved from the environment variable {@code CS_ADDRSERVER_PORT}, or
-     * defaults to 49802.
+     * Hose address of this ChatServer process.
+     * Retrieved dynamically using the {@link }
      */
-    private static final int ADDRESSING_SERVER_PORT = Integer
-            .parseInt(System.getenv().getOrDefault("CS_ADDRSERVER_PORT", "49802"));
+    private static final String PUBLIC_ADDRESS = NetworkUtils.getSerializedIdentity(Roles.CHATSERVER);;
+
+    /**
+     * Port on which the Addressing Server is listening for ChatServer connections.
+     * Retrieved dynamically using the {@link PrimaryDiscoveryReader}
+     */
+    private static volatile int asPort;
+
+    /**
+     * A thread-safe signal used to coordinate between the Recovery-Thread and the Main Selector.
+     * * Set to TRUE by the Main Selector Thread in handleConnect() once the TCP handshake
+     * with the new Primary is finalized.
+     * * Polled by the Recovery-Thread in attemptReconnectingToAddressingServer() to
+     * determine if the current reconnection attempt succeeded or if it should retry.
+     */
+    private static volatile boolean pivotSuccessful = false;
 
     /**
      * Port used for accepting client connections.
@@ -192,7 +118,7 @@ public class ChatServer {
      * Map of connected peer servers, keyed by their PID.
      * Each peer is represented by a {@link ConnectionContext}.
      */
-    private static final Map<Integer, ConnectionContext> connectedPeers = new ConcurrentHashMap<>();
+    private static final Map<Long, ConnectionContext> connectedPeers = new ConcurrentHashMap<>();
 
     /**
      * Maximum number of clients that can be served concurrently by this server.
@@ -216,18 +142,6 @@ public class ChatServer {
      */
     private static volatile boolean registered = false;
 
-    /**
-     * Enum representing different types of connections this server can manage.
-     * <ul>
-     * <li>{@code CLIENT} — incoming user/client connection</li>
-     * <li>{@code SERVER} — connection to or from another peer chat server</li>
-     * <li>{@code ADDRESSING_SERVER} — initial registration and update
-     * coordination</li>
-     * </ul>
-     */
-    enum ConnectionType {
-        CLIENT, SERVER, ADDRESSING_SERVER
-    }
 
     /**
      * Maps each {@link ConnectionType} to its respective handler implementation.
@@ -258,6 +172,37 @@ public class ChatServer {
      * @param type    the type of connection it accepts (CLIENT or SERVER)
      */
     private static record ServerBinding(ServerSocketChannel channel, ConnectionType type) {
+    }
+
+    /**
+     * Re-reads the shared discovery file to update the current known Primary.
+     * Sets static variables {@code primaryHostAddress} and {@code asPort}
+     * PRIMARY host address and port for client connections for the ChatServer.
+     *
+     * @return A {@link PrimaryAddress} if the shared file was found and its details were loaded; null otherwise.
+     */
+    public static PrimaryAddress retrievePrimaryDetails() {
+        try {
+            PrimaryAddress details = PrimaryDiscoveryReader.readPrimaryDetails();
+            if (details != null) {
+                primaryHostAddress = details.hostAddress();
+                asPort = details.clientPort();
+                return details;
+            }
+        } catch (IOException e) {
+            System.err.println("Config: Error reading primary addressing server discovery file: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    private static String getThisDockerAddress() {
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            System.out.println("[Replica] Could not retrieve internal Docker address - defaulting to 'localhost'");
+            return "localhost";
+        }
     }
 
     /**
@@ -296,9 +241,14 @@ public class ChatServer {
      *                     runtime
      */
     public static void main(String[] args) throws IOException {
+        String debugEnv = System.getenv().getOrDefault("CS_DEBUG_LEVEL", "2");
+        int debugLevel = Integer.parseInt(debugEnv);
+        setDebugLevel(debugLevel);
+        System.out.println("DEBUG SYSTEM INITIALIZED TO LEVEL: " + debugLevel);
         debug(DEBUG_BASIC, "Starting NIO Server...");
         debug(DEBUG_DETAILED, "Initializing handlers and selector...");
 
+        // 1. Initialize the Handlers
         handlerMap.put(ConnectionType.CLIENT, new ClientHandler());
         handlerMap.put(ConnectionType.SERVER, new ServerHandler());
         handlerMap.put(ConnectionType.ADDRESSING_SERVER, new AddressingServerHandler());
@@ -306,6 +256,7 @@ public class ChatServer {
         selector = Selector.open();
         debug(DEBUG_NORMAL, "Selector opened successfully");
 
+        // 2. Setup Listeners FIRST - Get initialized before trying to talk to the Addressing Server
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "2424"));
         if (isPortInUse(port)) {
             port = CLIENT_PORT;
@@ -315,55 +266,90 @@ public class ChatServer {
             CLIENT_PORT = port;
         }
 
+        // Bind ports so they are ready to receive connections immediately
+        ServerSocketChannel clientChannel = setupListener(port);
+        ServerSocketChannel peerChannel = setupListener(PEER_LISTEN_PORT);
+
+        clientChannel.register(selector, SelectionKey.OP_ACCEPT, ConnectionType.CLIENT);
+        peerChannel.register(selector, SelectionKey.OP_ACCEPT, ConnectionType.SERVER);
+
+        debug(DEBUG_BASIC, String.format("Listeners ready. Clients: %d, Peers: %d", port, PEER_LISTEN_PORT));
+
+        // 3. Register with Addressing Server ONLY AFTER listeners are up
         connectToAddressingServer(selector);
 
-        while (!isRegistered()) {
+        while (!registered) {
             selector.select();
             Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
-            debug(DEBUG_EXTREME, "Selector woke up with " + selector.selectedKeys().size() + " keys");
 
             while (keys.hasNext()) {
                 SelectionKey key = keys.next();
                 keys.remove();
 
-                if (!key.isValid())
-                    continue;
+                try {
+                    if (!key.isValid()) {
+                        Object attachment = key.attachment();
+                        if (attachment instanceof ConnectionContext ctx && ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                            debug(DEBUG_BASIC, "PRIMARY Addressing Server key became invalid. Initiating pivot...");
+                            startFailoverPivot();
+                        }
+                        continue;
+                    }
 
-                ConnectionContext ctx = (ConnectionContext) key.attachment();
-                if (ctx == null || ctx.type != ConnectionType.ADDRESSING_SERVER)
-                    continue;
+                    // 1. SILENTLY IGNORE LISTENERS
+                    // These are the server sockets on 2424/2425.
+                    if (key.isAcceptable()) {
+                        continue;
+                    }
 
-                if (key.isConnectable()) {
-                    handleConnect(key);
-                } else if (key.isWritable()) {
-                    handleWrite(key);
-                } else if (key.isReadable()) {
-                    handleRead(key);
+                    Object attachment = key.attachment();
+
+                    // 2. CHECK ATTACHMENT
+                    if (!(attachment instanceof ConnectionContext ctx)) {
+                        continue;
+                    }
+
+                    // 3. SEPARATE ADDRESSING SERVER FROM OTHERS
+                    if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                        if (key.isConnectable()) {
+                            handleConnect(key);
+                        } else if (key.isWritable()) {
+                            handleWrite(key);
+                        } else if (key.isReadable()) {
+                            handleRead(key);
+                        }
+                    } else {
+                        // This is a Peer or Client that attempted a connection while this server is registering.
+                        debug(DEBUG_DETAILED, "Queueing event for " + ctx.type + " (deferred until registered)");
+                    }
+                } catch (IOException ex) {
+                    debug(DEBUG_BASIC, "Connection error during registration: " + ex.getMessage());
+                    if (key.attachment() instanceof ConnectionContext ctx && ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                        debug(DEBUG_BASIC, "Primary Addressing Server failed during startup. Pivoting...");
+                        startFailoverPivot();
+                    }
+                    closeConnection(key);
                 }
             }
         }
 
-        debug(DEBUG_BASIC, String.format("Chat Server registered with assigned PID: %d", getID()));
-
-        List<ServerBinding> serverBindings = List.of(
-                new ServerBinding(setupListener(port), ConnectionType.CLIENT),
-                new ServerBinding(setupListener(PEER_LISTEN_PORT), ConnectionType.SERVER));
-
-        for (ServerBinding binding : serverBindings) {
-            binding.channel().register(selector, SelectionKey.OP_ACCEPT, binding.type());
-            debug(DEBUG_NORMAL, "Registered " + binding.type() + " server binding");
-        }
-
-        debug(DEBUG_BASIC, String.format("Listening for clients on %d, peers on %d", port, PEER_LISTEN_PORT));
-
-        debug(DEBUG_BASIC, "Starting heartbeat");
-
+        // Begin Heartbeat monitoring (it has a built-in delay to account for network initialization).
         Thread heartbeatThread = new Thread(new HeartbeatMonitor(connectedPeers));
         heartbeatThread.setDaemon(true);
         heartbeatThread.start();
 
         while (true) {
             selector.select();
+            debug(DEBUG_EXTREME, "Selector woke up with " + selector.selectedKeys().size() + " keys");
+            // Check all keys to see if any are tagged for closure by Heartbeat thread
+            for (SelectionKey key : selector.keys()) {
+                if (key.isValid() && key.attachment() instanceof ConnectionContext ctx) {
+                    if (ctx.needsClosing) {
+                        closeConnection(key);
+                    }
+                }
+            }
+
             Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
             debug(DEBUG_EXTREME, "Processing selector events...");
 
@@ -373,7 +359,12 @@ public class ChatServer {
 
                 try {
                     if (!key.isValid()) {
-                        debug(DEBUG_DETAILED, "Skipping invalid key");
+                        Object attachment = key.attachment();
+                        if (attachment instanceof ConnectionContext ctx && ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                            debug(DEBUG_BASIC, "Addressing Server key became invalid. Initiating Pivot...");
+                            startFailoverPivot();
+                        }
+                        else debug(DEBUG_DETAILED, "Skipping invalid key");
                         continue;
                     }
                     if (key.isAcceptable()) {
@@ -390,7 +381,11 @@ public class ChatServer {
                         handleConnect(key);
                     }
                 } catch (IOException ex) {
-                    debug(DEBUG_NORMAL, "Connection error: " + ex.getMessage());
+                    debug(DEBUG_NORMAL, "Connection error in main loop: " + ex.getMessage());
+                    if (key.attachment() instanceof ConnectionContext ctx && ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                        debug(DEBUG_BASIC, "Primary Addressing Server encountered an IO Error. Initiating Pivot...");
+                        startFailoverPivot();
+                    }
                     closeConnection(key);
                 }
             }
@@ -408,7 +403,7 @@ public class ChatServer {
      * </p>
      *
      * <p>
-     * If the connected socket is a peer server (i.e.,
+     * If the connected socket is a peer server (i.e.
      * {@link ConnectionType#SERVER}), and it's not a connection
      * to self, the method:
      * </p>
@@ -428,19 +423,59 @@ public class ChatServer {
         ConnectionContext ctx = (ConnectionContext) key.attachment();
         SocketChannel socketChannel = ctx.socketChannel;
 
-        debug(DEBUG_DETAILED, "handleConnect() called for: " + socketChannel.getRemoteAddress());
+        try {
+            if (socketChannel.finishConnect()) {
+                debug(DEBUG_NORMAL, "Successfully connected to peer PID = " + ctx.peerPID);
+                key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
 
-        if (socketChannel.finishConnect()) {
-            debug(DEBUG_NORMAL, "Finished connecting to peer: " + socketChannel.getRemoteAddress());
-            key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-
-            if (ctx.type == ConnectionType.SERVER && ctx.peerID != ID) {
-                debug(DEBUG_BASIC, "Marked peer " + ctx.peerID + " as connected.");
-                connectedPeers.put(ctx.peerID, ctx);
-                requestChatLogFor(ctx, key);
+                if (ctx.type == ConnectionType.SERVER && ctx.peerPID != PID) {
+                    connectedPeers.put(ctx.peerPID, ctx);
+                    requestChatLogFor(ctx, key);
+                }
+                else if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                    pivotSuccessful = true; // Let the recovery thread know a connection was established with PRIMARY
+                }
             }
-        } else {
-            debug(DEBUG_BASIC, "Connection not yet complete");
+        } catch (IOException e) {
+            if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                // We let the st
+                debug(DEBUG_NORMAL, "Addressing Server connection refused. Recovery thread will retry...");
+                key.cancel();
+                socketChannel.close();
+                return;
+            }
+
+            // Only attempt retries for PEER connections that were refused
+            if (ctx.type == ConnectionType.SERVER && e.getMessage().contains("refused")) {
+
+                if (ctx.retryCount < ConnectionContext.MAX_RETRIES) {
+                    ctx.retryCount++;
+                    debug(DEBUG_NORMAL, String.format("PID=%d not ready. Retry %d/%d...",
+                            ctx.peerPID, ctx.retryCount, ConnectionContext.MAX_RETRIES));
+
+                    // 1. Clean up current failed attempt
+                    socketChannel.close();
+                    key.cancel();
+
+                    // 2. Schedule the next attempt
+                    // In a real NIO app, you might use a ScheduledExecutor,
+                    // but for this, a brief sleep + re-call is functional.
+                    // Yes, this is going to lock up the main event loop...but I can only refactor so much of this codebase
+                    // why didn't he just copy what I did?!
+                    try { Thread.sleep(500 * ctx.retryCount); } catch (InterruptedException ignored) {}
+
+                    connectToPeerServer(selector, ctx.host, ctx.port, ctx.peerPID, ctx.retryCount);
+                    return; // Exit quietly! No exception thrown to main yet.
+                }
+                else {
+                    notifyPrimaryOfPeerFailure(ctx.peerPID, "Connection Refused (Max Retries Reached)");
+                }
+            }
+
+            // If we get here, it's either the Addressing Server failing,
+            // a different kind of IO error, or we've run out of retries.
+            // Throwing here triggers the 'catch' in your main loop.
+            throw new IOException("Connection failed after retries: " + e.getMessage());
         }
     }
 
@@ -470,9 +505,9 @@ public class ChatServer {
     private static void requestChatLogFor(ConnectionContext ctx, SelectionKey key) {
         try {
             ServerServerMessage request = new ServerServerMessage(
-                    String.valueOf(ID),
+                    String.valueOf(PID),
                     String.valueOf(
-                            ctx.peerID),
+                            ctx.peerPID),
                     "REQUEST_CHATLOG",
                     "");
 
@@ -483,7 +518,7 @@ public class ChatServer {
 
             key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
             debug(DEBUG_NORMAL,
-                    "Sent REQUEST_CHATLOG to peer PID=" + ctx.peerID + " at " + ctx.socketChannel.getRemoteAddress());
+                    "Sent REQUEST_CHATLOG to peer PID=" + ctx.peerPID + " at " + ctx.socketChannel.getRemoteAddress());
 
         } catch (Exception e) {
             debug(DEBUG_BASIC, "Failed to send REQUEST_CHATLOG to peer: " + e.getMessage());
@@ -548,10 +583,25 @@ public class ChatServer {
      *                 the channel
      */
     private static void connectToAddressingServer(Selector selector) {
+        // Stage 1: Discovery Phase
+        int discoveryAttempts = 0;
+        while (retrievePrimaryDetails() == null) {
+            discoveryAttempts++;
+            debug(DEBUG_BASIC, "Waiting for Addressing Server network details (Attempt " + discoveryAttempts + ")...");
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        debug(DEBUG_BASIC, "Found PRIMARY Addressing Server at " + primaryHostAddress + ":" + asPort);
+
+        // Stage 2: Connection Phase
         try {
             SocketChannel channel = SocketChannel.open();
             channel.configureBlocking(false);
-            channel.connect(new InetSocketAddress(ADDRESSING_SERVER_HOST, ADDRESSING_SERVER_PORT));
+            channel.connect(new InetSocketAddress(primaryHostAddress, asPort));
 
             ConnectionContext ctx = new ConnectionContext(channel);
             ctx.type = ConnectionType.ADDRESSING_SERVER;
@@ -571,22 +621,12 @@ public class ChatServer {
             // BaseAddrServerMessage<ChatServerRecord> registrationMsg = new
             // BaseAddrServerMessage<>(
             // "REGISTER", "ChatServerRecord", 0L, "CHATSERVER", "PRIMARY", record);
-            String publicAddress = System.getenv("PUBLIC_ADDRESS");
-            // Add a fallback if the environment variable isn't set
-            if (publicAddress == null || publicAddress.isEmpty()) {
-                InetAddress localHost = InetAddress.getLocalHost();
-                publicAddress = localHost.getHostAddress();
-                System.out.println(
-                        "WARNING: PUBLIC_ADDRESS not set in environment, using detected address: " + publicAddress);
-            } else {
-                System.out.println("Using PUBLIC_ADDRESS from environment: " + publicAddress);
-            }
+
             // This creates a registration message and a properly formed chat server record
             // all in one.
-            RegisterMessage<ChatServerRecord> registrationMsg = RegisterMessage.fromChatServer(publicAddress,
+            RegisterMessage<ChatServerRecord> registrationMsg = RegisterMessage.fromChatServer(PUBLIC_ADDRESS,
                     CLIENT_PORT,
                     PEER_LISTEN_PORT,
-                    ADDRESSING_SERVER_PORT,
                     MAX_CLIENTS);
 
             String json = registrationMsg.toJson() + "\n";
@@ -641,20 +681,35 @@ public class ChatServer {
 
             for (int i = 0; i < chatServers.length(); i++) {
                 JSONObject server = chatServers.getJSONObject(i);
-                int peerID = server.getInt("pid");
+                int peerPID = server.getInt("pid");
 
                 // Skip self
-                if (peerID == ID) {
-                    debug(DEBUG_LOW_LEVEL, "Skipping self in server list: PID=" + peerID);
+                if (peerPID == PID) {
+                    debug(DEBUG_LOW_LEVEL, "Skipping self in server list: PID=" + peerPID);
                     continue;
                 }
+
+                if (connectedPeers.containsKey(peerPID)) {
+                    debug(DEBUG_LOW_LEVEL, "Already connected to PID=" + peerPID + ". Skipping.");
+                    continue;
+                }
+
+                // --- TIE BREAKER LOGIC START -> Needed to avoid race conditions when several containers are spun up simultaneously. ---
+                // Only connect if this.ID is smaller than the peer's ID.
+                // If this.ID is larger, wait for the other process to make the connection request.
+                if (PID > peerPID) {
+                    debug(DEBUG_NORMAL, "My PID (" + PID + ") is higher than " + peerPID +
+                            ". Waiting for them to initiate the connection.");
+                    continue;
+                }
+                // --- TIE BREAKER LOGIC END ---
 
                 String peerAddress = server.getString("hostAddress");
                 int peerPort = server.getInt("peerPort");
 
                 debug(DEBUG_NORMAL,
-                        String.format("Attempting connection to peer PID=%d at %s:%d", peerID, peerAddress, peerPort));
-                connectToPeerServer(selector, peerAddress, peerPort, peerID);
+                        String.format("Attempting connection to peer PID=%d at %s:%d", peerPID, peerAddress, peerPort));
+                connectToPeerServer(selector, peerAddress, peerPort, peerPID,0);
             }
 
             debug(DEBUG_BASIC, "Finished processing peer server list.");
@@ -663,6 +718,41 @@ public class ChatServer {
             debug(DEBUG_BASIC, "Error parsing chat server list: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+
+    public static void processSingleChatServerRecord(ChatServerRecord record, Selector selector) {
+        if (record == null) return;
+
+        long peerPID = record.getPID(); 
+
+        // 1. Skip self
+        if (peerPID == PID) {
+            debug(DEBUG_LOW_LEVEL, "Skipping self in update: PID=" + peerPID);
+            return;
+        }
+
+        // 2. Check if already connected
+        if (connectedPeers.containsKey(peerPID)) {
+            debug(DEBUG_LOW_LEVEL, "Already connected to PID=" + peerPID + ". Skipping.");
+            return;
+        }
+
+        // 3. Tie Breaker: Only attempt a connection if my PID is higher than theirs
+        if (PID < peerPID) {
+            debug(DEBUG_NORMAL, "My PID (" + PID + ") is lower than " + peerPID +
+                    ". Waiting for them to initiate the connection.");
+            return;
+        }
+
+        // 4. Extract connection info directly from the record object
+        String peerAddress = record.getHostAddress();
+        int peerPort = record.getPeerPort();
+
+        debug(DEBUG_NORMAL, String.format("Initiating connection to peer PID=%d at %s:%d",
+                peerPID, peerAddress, peerPort));
+
+        connectToPeerServer(selector, peerAddress, peerPort, peerPID, 0);
     }
 
     /**
@@ -695,7 +785,8 @@ public class ChatServer {
      * <h3>Integration notes:</h3>
      * <ul>
      * <li>This method is usually called from
-     * {@link #processChatServerList(String, Selector)}</li>
+     * {@link #processChatServerList(String, Selector)}</li> or
+     * {@link #processSingleChatServerRecord(ChatServerRecord, Selector)}</li>
      * <li>The {@code OP_CONNECT} event is handled in the selector loop via
      * {@link #handleConnect(SelectionKey)}</li>
      * </ul>
@@ -705,12 +796,17 @@ public class ChatServer {
      * @param host     the IP address or hostname of the peer server
      * @param port     the peer server's listening port (typically the peer-to-peer
      *                 port)
-     * @param peerID   the unique process ID of the peer server, as assigned by the
+     * @param peerPID   the unique process ID of the peer server, as assigned by the
      *                 Addressing Server
      */
-
-    public static void connectToPeerServer(Selector selector, String host, int port, int peerID) {
-        debug(DEBUG_BASIC, String.format("Attempting to connect to peer server PID=%d at %s:%d", peerID, host, port));
+    public static void connectToPeerServer(Selector selector, String host, int port, long peerPID, int currentRetry) {
+        if (host == null || host.trim().isEmpty() || host.equals("null")) {
+            debug(DEBUG_BASIC, "Aborting peer connection attempt to server with PID " + peerPID
+                    + ": Host address is empty/null.");
+            notifyPrimaryOfPeerFailure(peerPID, "Bogus peer network address");
+            return;
+        }
+        debug(DEBUG_BASIC, String.format("Attempting to connect to peer server PID=%d at %s:%d", peerPID, host, port));
 
         try {
             SocketChannel peerChannel = SocketChannel.open();
@@ -719,19 +815,23 @@ public class ChatServer {
 
             ConnectionContext ctx = new ConnectionContext(peerChannel);
             ctx.type = ConnectionType.SERVER;
-            ctx.peerID = peerID;
+            ctx.peerPID = peerPID;
             ctx.host = host;
             ctx.port = port;
+            ctx.retryCount = currentRetry; // Maintain the retry count
 
             peerChannel.register(selector, SelectionKey.OP_CONNECT, ctx);
             selector.wakeup();
 
             debug(DEBUG_NORMAL, String.format(
                     "Initiated non-blocking connection to peer PID=%d at %s:%d — registered for OP_CONNECT",
-                    peerID, host, port));
-        } catch (IOException e) {
+                    peerPID, host, port));
+        } catch (UnresolvedAddressException uae) {
+            debug(DEBUG_BASIC, "DNS Failure for peer " + peerPID + " (" + host + "). Reporting to Primary.");
+            notifyPrimaryOfPeerFailure(peerPID, "Unresolved Host");
+        } catch (IOException ioe) {
             debug(DEBUG_BASIC,
-                    String.format("Failed to connect to peer server at %s:%d — %s", host, port, e.getMessage()));
+                    String.format("Failed to connect to peer server at %s:%d — %s", host, port, ioe.getMessage()));
             return;
         }
 
@@ -827,13 +927,28 @@ public class ChatServer {
     private static void handleRead(SelectionKey key) throws IOException {
         ConnectionContext ctx = (ConnectionContext) key.attachment();
         SocketChannel socketChannel = ctx.socketChannel;
-        debug(DEBUG_DETAILED, "Reading from connection: " + socketChannel.getRemoteAddress());
 
-        int bytesRead = socketChannel.read(ctx.readBuffer);
-        ctx.lastActivityTime = System.currentTimeMillis();
+        int bytesRead;
+        // Stage 1: Attempt to read from the socket
+        try {
+            bytesRead = socketChannel.read(ctx.readBuffer);
+        } catch (IOException e) {
+            debug(DEBUG_BASIC, "Connection reset by peer: " + e.getMessage());
+            bytesRead = -1;
+        }
+
+        // Stage 2: Handle failed connection
         if (bytesRead == -1) {
             ctx.partialData.setLength(0);
             debug(DEBUG_NORMAL, "End of stream reached, closing connection");
+
+            // NEW FAILOVER LOGIC FOR RECONNECTING TO THE PRIMARY ADDRESSING SERVER
+            if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                debug(DEBUG_BASIC, "CRITICAL: Addressing Server connection lost. Triggering failover....");
+                startFailoverPivot();
+                return;
+            }
+
             closeConnection(key);
             return;
         }
@@ -963,6 +1078,25 @@ public class ChatServer {
         debug(DEBUG_DETAILED, "Write queue empty, removing OP_WRITE");
     }
 
+
+    /**
+     * Notifies the Primary Addressing Server that a specific Peer has crashed
+     * or provided an unreachable address.
+     * * @param peerPID The Process ID of the faulty/disconnected peer.
+     * @param reason  A description for the logs (e.g., "Crash" or "Bogus Address").
+     */
+    public static void notifyPrimaryOfPeerFailure(long peerPID, String reason) {
+        if (peerPID == -1) return;
+
+        AddressingServerHandler addrHandler = (AddressingServerHandler) handlerMap.get(ConnectionType.ADDRESSING_SERVER);
+        if (addrHandler != null) {
+            addrHandler.notifyPeerCrash(peerPID);
+            debug(DEBUG_BASIC, String.format("Notified Addressing Server of %s: PID %d", reason, peerPID));
+        } else {
+            debug(DEBUG_DETAILED, "Could not notify Primary: AddressingServerHandler not initialized.");
+        }
+    }
+
     /**
      * Closes a socket connection and performs cleanup based on its connection type.
      * <p>
@@ -999,50 +1133,52 @@ public class ChatServer {
      * @param key the {@link SelectionKey} corresponding to the channel being closed
      * @throws IOException if closing the socket channel fails
      */
+    private static void closeConnection(SelectionKey key) {
+        if (key == null) return;
 
-    private static void closeConnection(SelectionKey key) throws IOException {
+        Object attachment = key.attachment();
+        if (!(attachment instanceof ConnectionContext ctx)) {
+            debug(DEBUG_LOW_LEVEL, "Skipping cleanup: attachment is not a ConnectionContext");
+            return;
+        }
+
         SocketChannel socketChannel = (SocketChannel) key.channel();
 
-        ConnectionContext ctx = (ConnectionContext) key.attachment();
+
+        // 1. CLEAR THE MAPS FIRST
+        // This stops the Heartbeat thread and other logic from seeing this peer immediately
+        if (ctx.peerPID != -1) {
+            connectedPeers.remove(ctx.peerPID);
+            // If your HeartbeatMonitor uses 'peerMap', ensure it's the same reference
+            debug(DEBUG_BASIC, "Removed PID " + ctx.peerPID + " from active peer tracking.");
+        }
+
+        // 2. CLEAN UP CLIENT STATE
         if (ctx.username != null) {
             ClientHandler.unregisterUsername(ctx.username);
-            // Notify addressing server about client disconnection
             if (ctx.type == ConnectionType.CLIENT) {
                 notifyAddressingServerClientCount();
             }
         }
 
-        if (ctx.type == ConnectionType.SERVER) {
-            ConnectionContext lostCtx = connectedPeers.get(ctx.peerID);
-            int peerId = ctx.peerID;
-
-            // Try reconnection first
-            attemptRecconnectingToPeer(lostCtx);
-            connectedPeers.remove(peerId);
-
-            // Then notify addressing server about the disconnection
-            // Only do this if reconnection fails or after reconnection attempts
-            if (handlerMap.get(ConnectionType.ADDRESSING_SERVER) != null) {
-                ((AddressingServerHandler) handlerMap.get(ConnectionType.ADDRESSING_SERVER))
-                        .notifyPeerCrash(peerId);
-                debug(DEBUG_BASIC, "Notified addressing server about disconnected peer " + peerId);
-            }
-        } else if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
-            debug(DEBUG_BASIC, "Lost connection to Addressing Server. Attempting to reconnect...");
-            // Start a reconnection attempt to the addressing server
-            attemptReconnectingToAddressingServer();
+        // 3. NOTIFY ADDRESSING SERVER (only if it was a peer)
+        if (ctx.type == ConnectionType.SERVER && ctx.peerPID != -1) {
+            notifyPrimaryOfPeerFailure(ctx.peerPID, "peer chat server failure");
         }
 
+        // 4. PHYSICAL TEARDOWN
         try {
-            SocketAddress remoteAddr = socketChannel.getRemoteAddress();
-            debug(DEBUG_NORMAL, "Closing connection to " + remoteAddr);
+            key.cancel();
+            if (socketChannel != null && socketChannel.isOpen()) {
+                socketChannel.close();
+            }
+            debug(DEBUG_NORMAL, "Socket channel and SelectionKey closed/cancelled successfully.");
         } catch (IOException e) {
-            debug(DEBUG_NORMAL, "Channel was already closed or not available during cleanup.");
+            debug(DEBUG_LOW_LEVEL, "Cleanup: Channel already closed.");
         }
-        key.cancel();
-        if (socketChannel.isOpen())
-            socketChannel.close();
     }
+
+
 
     /**
      * Attempts to reconnect to a lost peer server using its previous connection
@@ -1087,15 +1223,15 @@ public class ChatServer {
             return false;
         }
 
-        int peerID = lostCtx.peerID;
-        debug(DEBUG_BASIC, "Attempting reconnection to lost peer ID: " + peerID);
+        long peerPID = lostCtx.peerPID;
+        debug(DEBUG_BASIC, "Attempting reconnection to lost peer ID: " + peerPID);
 
         final int MAX_RETRIES = 5;
         final int RETRY_DELAY_MS = 2000;
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
-                debug(DEBUG_NORMAL, "Reconnection attempt " + attempt + " to peer PID=" + peerID);
+                debug(DEBUG_NORMAL, "Reconnection attempt " + attempt + " to peer PID=" + peerPID);
 
                 SocketChannel peerChannel = SocketChannel.open();
                 peerChannel.configureBlocking(false);
@@ -1103,12 +1239,12 @@ public class ChatServer {
 
                 ConnectionContext newCtx = new ConnectionContext(peerChannel);
                 newCtx.type = ConnectionType.SERVER;
-                newCtx.peerID = peerID;
+                newCtx.peerPID = peerPID;
                 newCtx.host = lostCtx.host;
                 newCtx.port = lostCtx.port;
 
                 peerChannel.register(selector, SelectionKey.OP_CONNECT, newCtx);
-                debug(DEBUG_BASIC, "Reconnection initiated to peer PID=" + peerID);
+                debug(DEBUG_BASIC, "Reconnection initiated to peer PID=" + peerPID);
                 return true;
             } catch (IOException e) {
                 debug(DEBUG_NORMAL, "Reconnection attempt " + attempt + " failed: " + e.getMessage());
@@ -1122,7 +1258,7 @@ public class ChatServer {
             }
         }
 
-        debug(DEBUG_BASIC, "All reconnection attempts failed for peer PID=" + peerID);
+        debug(DEBUG_BASIC, "All reconnection attempts failed for peer PID=" + peerPID);
         return false;
     }
 
@@ -1144,7 +1280,7 @@ public class ChatServer {
      * <li>Connects to the Addressing Server's known address</li>
      * <li>Creates a new {@link ConnectionContext} and registers it for
      * {@code OP_CONNECT}</li>
-     * <li>Sends a REGISTER message to re-establish this chat server's presence</li>
+     * <li>Sends a SYNCHRONIZE message to re-establish this chat server's presence</li>
      * </ul>
      * </li>
      * <li>If all attempts fail, a message is logged and the server continues
@@ -1154,6 +1290,7 @@ public class ChatServer {
      * </ul>
      */
     private static void attemptReconnectingToAddressingServer() {
+        pivotSuccessful = false; // Reset established PRIMARY connection flag
         debug(DEBUG_BASIC, "Attempting reconnection to Addressing Server...");
 
         // First, check if we already have any active addressing server connections
@@ -1166,52 +1303,64 @@ public class ChatServer {
         final int RETRY_DELAY_MS = 3000;
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            if (pivotSuccessful) {
+                debug(DEBUG_BASIC, "Pivot confirmed successful. Recovery thread exiting.");
+                return;
+            }
             try {
                 debug(DEBUG_NORMAL, "Addressing Server reconnection attempt " + attempt);
+
+                // Retrieve the host address for the new PRIMARY using the shared discovery volume
+                PrimaryAddress details = retrievePrimaryDetails();
+                // If the election isn't done, wait and try again
+                if (details == null) {
+                    debug(DEBUG_LOW_LEVEL, "Discovery file not ready yet (Election may be in progress). Retrying...");
+                    try {
+                        // Give the leader election time to complete and write new network details to the shared volume
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        debug(DEBUG_NORMAL, "Failover retry sleep interrupted. Aborting recovery.");
+                        break;
+                    }
+                    continue;
+                }
 
                 // Create a new connection to the addressing server
                 SocketChannel channel = SocketChannel.open();
                 channel.configureBlocking(false);
-                channel.connect(new InetSocketAddress(ADDRESSING_SERVER_HOST, ADDRESSING_SERVER_PORT));
+                channel.connect(new InetSocketAddress(primaryHostAddress, asPort));
 
                 ConnectionContext ctx = new ConnectionContext(channel);
                 ctx.type = ConnectionType.ADDRESSING_SERVER;
 
-                // Create a new registration message
-                String publicAddress = System.getenv("PUBLIC_ADDRESS");
-                // Add a fallback if the environment variable isn't set
-                if (publicAddress == null || publicAddress.isEmpty()) {
-                    try {
-                        InetAddress localHost = InetAddress.getLocalHost();
-                        publicAddress = localHost.getHostAddress();
-                        System.out.println(
-                                "WARNING: PUBLIC_ADDRESS not set in environment, using detected address: "
-                                        + publicAddress);
-                    } catch (IOException ioe) {
-                        publicAddress = "localhost";
-                        System.out.println("Failed to get local host address, using localhost");
-                    }
-                } else {
-                    System.out.println("Using PUBLIC_ADDRESS from environment: " + publicAddress);
-                }
+                // Create a new synchronization message
 
-                RegisterMessage<ChatServerRecord> registrationMsg = RegisterMessage.fromChatServer(
-                        publicAddress,
-                        CLIENT_PORT,
-                        PEER_LISTEN_PORT,
-                        ADDRESSING_SERVER_PORT,
-                        MAX_CLIENTS);
+                ChatServerRecord myRecord = new ChatServerRecord(PID, PUBLIC_ADDRESS, CLIENT_PORT, PEER_LISTEN_PORT, MAX_CLIENTS);
+                SyncRegisterMessage<ChatServerRecord> synchronizeMsg = SyncRegisterMessage.fromChatServer(msgIDGenerator.nextID(),myRecord);
 
-                String json = registrationMsg.toJson() + "\n";
+                String json = synchronizeMsg.toJson() + "\n";
                 ctx.writeQueue.add(ByteBuffer.wrap(json.getBytes(StandardCharsets.UTF_8)));
 
                 channel.register(selector, SelectionKey.OP_CONNECT, ctx);
-                debug(DEBUG_BASIC, "Reconnection attempt to Addressing Server initiated");
+                debug(DEBUG_BASIC, "Reconnection attempt initiated. Waiting for handshake...");
 
-                // Wake up the selector to process this connection immediately
+                // Wake up the selector so the MAIN THREAD can process the OP_CONNECT
                 selector.wakeup();
-                return;
-            } catch (IOException e) {
+                // Check to see if the connection has been established in the main thread
+                for (int i = 0; i < 30; i++) { // Poll for 3 seconds (30 * 100ms)
+                    if (pivotSuccessful) {
+                        debug(DEBUG_BASIC, "Handshake confirmed by Selector. Pivot to new PRIMARY complete!");
+                        return;
+                    }
+                    Thread.sleep(100);
+                }
+
+                // If we reach here, pivotSuccessful is still false.
+                // The 3-second timeout hit, so we loop to the next 'attempt'.
+                debug(DEBUG_NORMAL, "Handshake timed out for attempt " + attempt + ". Retrying...");
+                channel.close();
+            } catch (IOException | InterruptedException e) {
                 debug(DEBUG_NORMAL, "Reconnection attempt " + attempt + " failed: " + e.getMessage());
                 try {
                     Thread.sleep(RETRY_DELAY_MS);
@@ -1222,7 +1371,6 @@ public class ChatServer {
                 }
             }
         }
-
         debug(DEBUG_BASIC,
                 "All reconnection attempts to Addressing Server failed. The Chat Server will continue to operate but may have limited functionality.");
     }
@@ -1321,8 +1469,8 @@ public class ChatServer {
      * @return the server's unique process ID
      */
 
-    public static int getID() {
-        return ID;
+    public static long getPID() {
+        return PID;
     }
 
     /**
@@ -1405,8 +1553,8 @@ public class ChatServer {
             }
 
             ServerServerMessage ping = new ServerServerMessage(
-                    String.valueOf(ID),
-                    String.valueOf(ctx.peerID),
+                    String.valueOf(PID),
+                    String.valueOf(ctx.peerPID),
                     "PING",
                     "");
 
@@ -1415,7 +1563,7 @@ public class ChatServer {
             key.selector().wakeup(); // optional but recommended
 
             ctx.awaitingPong = true;
-            debug(DEBUG_NORMAL, "Sent PING to peer PID=" + ctx.peerID);
+            debug(DEBUG_NORMAL, "Sent PING to peer PID=" + ctx.peerPID);
 
         } catch (Exception e) {
             debug(DEBUG_BASIC, "Failed to send PING: " + e.getMessage());
@@ -1437,7 +1585,7 @@ public class ChatServer {
      *
      * @return a concurrent map of peer IDs to {@link ConnectionContext}s
      */
-    public static Map<Integer, ConnectionContext> getConnectedPeers() {
+    public static Map<Long, ConnectionContext> getConnectedPeers() {
         return connectedPeers;
     }
 
@@ -1466,8 +1614,8 @@ public class ChatServer {
      *
      * @param id the process ID assigned by the Addressing Server
      */
-    public static void setID(int id) {
-        ID = id;
+    public static void setPID(int id) {
+        PID = id;
     }
 
     /**
@@ -1505,7 +1653,7 @@ public class ChatServer {
 
             // Create client count notification message
             NotificationMessage<Integer> notification = NotificationMessage.clientCountNotification(
-                    ID, currentClientCount);
+                    PID, currentClientCount);
 
             String json = notification.toJson() + "\n";
 
@@ -1540,4 +1688,85 @@ public class ChatServer {
         }
     }
 
+    /**
+     * Safely terminates all existing connections to the Addressing Server.
+     * <p>
+     * Note: Unlike {@link #closeConnection(SelectionKey)}, this method does not
+     * perform peer-crash notifications because the Addressing Server is the
+     * entity being replaced. It focuses on a clean physical teardown to prevent
+     * stale socket descriptors during a failover pivot.
+     * </p>
+     */
+    private static boolean cleanupAddressingConnections() {
+        boolean activeConnections = false;
+
+        debug(DEBUG_DETAILED, "Sweeping selector for stale Addressing Server keys...");
+
+        for (SelectionKey key : selector.keys()) {
+            if (!key.isValid()) continue;
+
+            Object attachment = key.attachment();
+
+            // SAFETY CHECK: Filter out the Listeners (Enums) and only look at ConnectionContexts (remote connections)
+            if (attachment instanceof ConnectionContext ctx) {
+                // We only target the Addressing Server connection for this specific sweep
+                if (ctx.type == ConnectionType.ADDRESSING_SERVER) {
+                    try {
+                        debug(DEBUG_NORMAL, "Force-closing stale Addressing Server connection.");
+                        // 1. Cancel the key to remove it from the next select() cycle
+                        key.cancel();
+                        if (key.channel() instanceof SocketChannel sc && sc.isOpen()) {
+                            // 2. Close the channel to release the file descriptor/port
+                            sc.close();
+                        }
+                        activeConnections = true;
+                    } catch (IOException e) {
+                        debug(DEBUG_LOW_LEVEL, "Addressing cleanup: Channel already closed.");
+                    }
+                }
+            }
+        }
+        if (activeConnections) {
+            // Wake up the selector so it can immediately process any cancellations
+            selector.wakeup();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Pivots the connection to a NEW Primary after a failover/election.
+     */
+    public static void pivotToNewPrimary() {
+        debug(DEBUG_BASIC, "Primary change detected. Refreshing PRIMARY details and reconnecting...");
+        // Stage 1: Clear out any existing Addressing Server keys so we don't have dead connections
+        if (cleanupAddressingConnections()) {
+            debug(DEBUG_BASIC, "Successfully cleared AddressingServer connections...");
+        }
+        // Stage 2: Trigger a reconnection attempt to the new PRIMARY
+        attemptReconnectingToAddressingServer();
+    }
+
+
+    /**
+     * Pivots the connection to a NEW Primary after a failover/election.
+     * Initiates the recovery process in a supervised background thread.
+     */
+    public static void startFailoverPivot() {
+        Thread recoveryThread = new Thread(() -> {
+            try {
+                pivotToNewPrimary();
+            } catch (Exception e) {
+                debug(DEBUG_BASIC, "FATAL: Failover recovery thread crashed: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }, "Failover-Recovery-Thread");
+
+        // This ensures that if the thread fails, a log entry will be printed to console.
+        recoveryThread.setUncaughtExceptionHandler((t, e) -> {
+            debug(DEBUG_BASIC, "Uncaught exception in " + t.getName() + ": " + e.getMessage());
+        });
+
+        recoveryThread.start();
+    }
 }

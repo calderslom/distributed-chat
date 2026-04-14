@@ -9,6 +9,8 @@ import org.jline.reader.UserInterruptException;
 
 import io.github.cpsc559.team16.common.utilities.ClientServerMessage;
 
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
+
 /**
  * A thread responsible for handling user input from the command line interface.
  * <p>
@@ -105,9 +107,17 @@ public class InputThread extends Thread {
          * </ul>
          * </p>
          */
-        @Override
-        public void run() {
+    public void run() {
+        try {
             while (!client.isTerminated()) {
+                while (!client.isConnected()) {
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
                 try {
                     String msgContents = lineReader.readLine();
                     if (msgContents == null) {
@@ -117,7 +127,7 @@ public class InputThread extends Thread {
                     lineReader.getBuffer().clear();
 
                     if (msgContents.trim().equalsIgnoreCase("/exit") || msgContents.trim().equalsIgnoreCase("/quit")) {
-                        Client.debug(Client.DEBUG_BASIC, "Received exit command. Shutting down client...");
+                        debug(DEBUG_BASIC, "Received exit command. Shutting down client...");
                         client.shutdown();
                         return;
                     }
@@ -129,13 +139,13 @@ public class InputThread extends Thread {
                                 Thread.sleep(MIN_MESSAGE_INTERVAL - (currentTime - lastMessageTime));
                             } catch (InterruptedException e) {
                                 if (!client.isTerminated()) {
-                                    Client.debug(Client.DEBUG_NORMAL, "Input thread interrupted during rate limiting");
+                                    debug(DEBUG_NORMAL, "Input thread interrupted during rate limiting");
                                 }
                                 break;
                             }
                         }
 
-                        Client.debug(Client.DEBUG_DETAILED, "Processing user input: " + msgContents);
+                        debug(DEBUG_DETAILED, "Processing user input: " + msgContents);
                         ClientServerMessage newMsg = client.getMessageUtils().createMessage(msgContents, "fellow clients");
 
                         synchronized (client.getMessageLock()) {
@@ -157,20 +167,28 @@ public class InputThread extends Thread {
                         Thread.sleep(10);
                     } catch (InterruptedException e) {
                         if (!client.isTerminated()) {
-                            Client.debug(Client.DEBUG_NORMAL, "Input thread interrupted");
+                            debug(DEBUG_NORMAL, "Input thread interrupted");
                         }
                         break;
                     }
                 } catch (UserInterruptException e) {
                     if (!client.isTerminated()) {
-                        Client.debug(Client.DEBUG_NORMAL, "Input interrupted");
+                        debug(DEBUG_NORMAL, "[INPUT THREAD] Input interrupted");
+                    } else {
+                        debug(DEBUG_BASIC, "User interrupted input (Ctrl+C).");
                     }
+                    client.shutdown();
                     break;
                 } catch (Exception e) {
-                    Client.debug(Client.DEBUG_NORMAL, "Input thread error: " + e.getMessage());
+                    debug(DEBUG_NORMAL, "Input thread error: " + e.getMessage());
                     break;
                 }
             }
+        } finally {
+            // Moved outside the while loop so it only fires ONCE upon thread exit
+            debug(DEBUG_DETAILED, "InputThread releasing shutdown latch.");
             client.getShutdownLatch().countDown();
         }
+    }
+
     }

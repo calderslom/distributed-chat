@@ -3,6 +3,8 @@ package io.github.cpsc559.team16.chatserver;
 import java.nio.channels.SelectionKey;
 import java.util.Map;
 
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
+
 /**
  * Monitors the heartbeat of connected peer servers and clients, ensuring that
  * inactive peers
@@ -46,41 +48,48 @@ import java.util.Map;
  */
 
 public class HeartbeatMonitor implements Runnable {
-    private static final long IDLE_TIMEOUT = 8_000; // 8 seconds
+    private static final long IDLE_TIMEOUT = 15000; // 15 seconds
     private static final int MAX_MISSED = 3;
+    private final long monitorStartTime = System.currentTimeMillis();
+    private static final long STARTUP_GRACE_PERIOD = 20_000; // 20 seconds
 
-    private final Map<Integer, ConnectionContext> peerMap;
+    private final Map<Long, ConnectionContext> peerMap;
 
-    public HeartbeatMonitor(Map<Integer, ConnectionContext> peerMap) {
+    public HeartbeatMonitor(Map<Long, ConnectionContext> peerMap) {
         this.peerMap = peerMap;
     }
 
-    public static final int DEBUG_LEVEL = Integer.parseInt(System.getenv().getOrDefault("DEBUG_LEVEL", "1"));
-
-    private static void debug(int level, String message) {
-        if (level <= DEBUG_LEVEL) {
-            String prefix = switch (level) {
-                case 1 -> "[BASIC] ";
-                case 2 -> "[NORMAL] ";
-                case 3 -> "[DETAILED] ";
-                case 4 -> "[LOW_LEVEL] ";
-                case 5 -> "[EXTREME] ";
-                default -> "[INFO] ";
-            };
-            System.out.println(prefix + "[HEARTBEAT] " + message);
-        }
-    }
 
     @Override
     public void run() {
+        debug(DEBUG_BASIC, "Starting heartbeat thread...");
         while (true) {
-            debug(3, "Checking peers for heartbeat...");
+
+            // Servers cannot begin aggressive heartbeat monitoring right out of the gate. They need a grace period.
+            if (System.currentTimeMillis() - monitorStartTime < STARTUP_GRACE_PERIOD) {
+                debug(DEBUG_BASIC, "In startup grace period, skipping health checks...");
+                try { Thread.sleep(5000); } catch (InterruptedException e) {}
+                continue;
+            }
+
+            if (this.peerMap.isEmpty()) {
+                debug(DEBUG_BASIC, "No active peer connections exist.");
+            } else {
+                debug(DEBUG_DETAILED, "Checking " + this.peerMap.size() + " peers for heartbeat...");
+            }
+
 
             long now = System.currentTimeMillis();
 
-            for (Map.Entry<Integer, ConnectionContext> entry : peerMap.entrySet()) {
-                int peerID = entry.getKey();
+            for (Map.Entry<Long, ConnectionContext> entry : peerMap.entrySet()) {
+                long peerID = entry.getKey();
                 ConnectionContext ctx = entry.getValue();
+
+                if (peerID == -1 || ctx.peerPID == -1) {
+                    debug(3, "Skipping unidentified peer connection...");
+                    continue;
+                }
+
                 SelectionKey key = ctx.socketChannel.keyFor(ChatServer.getSelector());
 
                 if (key == null || !key.isValid()) {
@@ -98,12 +107,12 @@ public class HeartbeatMonitor implements Runnable {
 
                         if (ctx.missedPongs >= MAX_MISSED) {
                             try {
-                                debug(1, "Closing unresponsive peer " + peerID);
+                                debug(1, "Tagging unresponsive peer " + peerID + " for closure.");
 
-                                // Don't notify addressing server here, let ChatServer.closeConnection handle it
+                                ctx.needsClosing = true; // Set the flag
+                                ChatServer.getSelector().wakeup(); // Interrupt the main thread's selector.select()
 
-                                key.cancel();
-                                ctx.socketChannel.close();
+                                // We remove it from the map here so heartbeats stop immediately
                                 peerMap.remove(peerID);
                             } catch (Exception e) {
                                 debug(1, "Error closing peer " + peerID + ": " + e.getMessage());

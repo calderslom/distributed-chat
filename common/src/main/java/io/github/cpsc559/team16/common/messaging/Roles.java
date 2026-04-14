@@ -37,6 +37,16 @@ public class Roles {
      */
     public static final String CLIENT = "CLIENT";
 
+    /**
+     * Helper to validate if a string is a recognized role.
+     */
+    public static boolean isValid(String role) {
+        return PRIMARY.equals(role) ||
+                REPLICA.equals(role) ||
+                CHATSERVER.equals(role) ||
+                CLIENT.equals(role);
+    }
+
     // Preventing any possible instantiation of the utility class
     private Roles() {}
 }

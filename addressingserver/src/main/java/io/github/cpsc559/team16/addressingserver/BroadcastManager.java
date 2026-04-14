@@ -3,15 +3,18 @@ package io.github.cpsc559.team16.addressingserver;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
-import io.github.cpsc559.team16.common.messaging.Roles;
-import io.github.cpsc559.team16.common.messaging.ServerFailureMessage;
-import io.github.cpsc559.team16.common.messaging.UpdateMessage;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
+import io.github.cpsc559.team16.common.messaging.*;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
 
 import java.io.IOException;
 import java.nio.channels.SocketChannel;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+
+import static io.github.cpsc559.team16.common.logging.DebugLogger.debug;
 
 public class BroadcastManager {
 
@@ -26,9 +29,11 @@ public class BroadcastManager {
      */
     private final Map<SocketChannel, NIOMessageChannel> peerChannels;
 
+    private final MessageIDGenerator genMID;
 
-    public BroadcastManager(Map<SocketChannel, NIOMessageChannel> peerChannels,
+    public BroadcastManager(MessageIDGenerator genMID, Map<SocketChannel, NIOMessageChannel> peerChannels,
                             Map<SocketChannel, NIOMessageChannel> chatServerChannels, ConnectionCleanupManager cleanupManager) {
+        this.genMID = genMID;
         this.peerChannels = peerChannels;
         this.chatServerChannels = chatServerChannels;
         this.cleanupManager = cleanupManager;
@@ -43,13 +48,13 @@ public class BroadcastManager {
      * remains consistent across all registered nodes.
      * </p>
      *
-     * @param primaryPID the PID of the primary server issuing the update.
+     * @param senderPID the PID of the primary server issuing the update.
      * @param record        the {@link AddrServerRecord} containing the update information.
      */
-    public void broadcastChatServerRecord(Long primaryPID, ChatServerRecord record) {
-        UpdateMessage<ChatServerRecord> forChatServer = UpdateMessage.csRecordPrimaryToCS(primaryPID, record);
+    public void broadcastChatServerRecord(Long senderPID, ChatServerRecord record) {
+        UpdateMessage<ChatServerRecord> forChatServer = UpdateMessage.csRecordPrimaryToCS(senderPID, record);
         broadcastServerRecordNoEvent(forChatServer, chatServerChannels);
-        UpdateMessage<ChatServerRecord> forReplica = UpdateMessage.csRecordPrimaryToReplica(primaryPID, record);
+        UpdateMessage<ChatServerRecord> forReplica = UpdateMessage.csRecordPrimaryToReplica(senderPID, record);
         broadcastServerRecordNoEvent(forReplica, peerChannels);
     }
 
@@ -63,11 +68,11 @@ public class BroadcastManager {
      * </p>
      * <p>Updating processes throughout the distributed network is necessary to maintain consistency.</p>
      *
-     * @param primaryPID the PID of the primary server issuing the update.
+     * @param senderPID the PID of the primary server issuing the update.
      * @param record        the {@link AddrServerRecord} containing the update information.
      */
-    public void broadcastAddrServerRecordToCS(Long primaryPID, AddrServerRecord record) {
-        UpdateMessage<AddrServerRecord> forChatServer = UpdateMessage.asRecordPrimaryToCS(primaryPID, record);
+    public void broadcastAddrServerRecordToCS(Long senderPID, AddrServerRecord record) {
+        UpdateMessage<AddrServerRecord> forChatServer = UpdateMessage.asRecordPrimaryToCS(senderPID, record);
         broadcastServerRecordNoEvent(forChatServer, chatServerChannels);
     }
 
@@ -81,11 +86,11 @@ public class BroadcastManager {
      * remains consistent across all registered nodes.
      * </p>
      *
-     * @param primaryPID the PID of the primary server issuing the update.
+     * @param senderPID the PID of the primary server issuing the update.
      * @param record        the {@link AddrServerRecord} containing the update information.
      */
-    public void broadcastChatServerRecordToCS(Long primaryPID, ChatServerRecord record) {
-        UpdateMessage<ChatServerRecord> forChatServer = UpdateMessage.csRecordPrimaryToCS(primaryPID, record);
+    public void broadcastChatServerRecordToCS(Long senderPID, ChatServerRecord record) {
+        UpdateMessage<ChatServerRecord> forChatServer = UpdateMessage.csRecordPrimaryToCS(senderPID, record);
         broadcastServerRecordNoEvent(forChatServer, chatServerChannels);
     }
 
@@ -174,15 +179,15 @@ public class BroadcastManager {
      * </p>
      *
      * @param messageID        the unique message ID used to correlate ACKs and retries
-     * @param primaryPID       the PID of the primary addressing server initiating the update
+     * @param senderPID       the PID of the primary addressing server broadcasting the update
      * @param record           the {@link AddrServerRecord} containing the update to replicate
      * @param pendingEvent     the {@link PendingEvent} tracking acknowledgments and recipient state
      */
-    public void broadcastASRecordToReplicas(long messageID, Long primaryPID, AddrServerRecord record,
+    public void broadcastASRecordToReplicas(long messageID, Long senderPID, AddrServerRecord record,
                                             PendingEvent pendingEvent)
     {
         // Create the message to send to Replicas for synchronization of state across all Addressing Servers.
-        UpdateMessage<AddrServerRecord> updateMessage = UpdateMessage.asRecordPrimaryToReplica(messageID, primaryPID, record);
+        UpdateMessage<AddrServerRecord> updateMessage = UpdateMessage.asRecordPrimaryToReplica(messageID, senderPID, record);
         // Add this message to the pending event in case we need to retry sending the message.
         pendingEvent.setMessageRequiringACK(updateMessage);
         // Broadcast the message to all registered replicas - pass the map that is referenced by the pending event
@@ -206,14 +211,14 @@ public class BroadcastManager {
      * </p>
      *
      * @param messageID        the unique message ID used to correlate ACKs and retries
-     * @param primaryPID       the PID of the primary addressing server initiating the update
+     * @param senderPID       the PID of the primary addressing server broadcasting the update
      * @param record           the {@link ChatServerRecord} containing the update to replicate
      * @param pendingEvent     the {@link PendingEvent} tracking acknowledgments and recipient state
      */
-    public void broadcastCSRecordToReplicas(long messageID, Long primaryPID, ChatServerRecord record,
+    public void broadcastCSRecordToReplicas(long messageID, Long senderPID, ChatServerRecord record,
                                             PendingEvent pendingEvent) {
         // Create the message to send to Replicas for synchronization of state across all Addressing Servers.
-        UpdateMessage<ChatServerRecord> updateMessage = UpdateMessage.csRecordPrimaryToReplica(messageID, primaryPID, record);
+        UpdateMessage<ChatServerRecord> updateMessage = UpdateMessage.csRecordPrimaryToReplica(messageID, senderPID, record);
         // Add this message to the pending event in case we need to retry sending the message.
         pendingEvent.setMessageRequiringACK(updateMessage);
         // Broadcast the message to all registered replicas - pass the map that is referenced by the pending event
@@ -235,23 +240,30 @@ public class BroadcastManager {
      * This is because we are only sending data to one recipient. No actions involving this recipient should continue, thus
      * an error is thrown and the calling code will be notified and have the option of handling it there, or passing it "up the chain".
      *
-     * @param primaryPID the PID of the primary server sending the updates.
+     * @param senderPID the PID of the primary server sending the updates.
      * @param nioChannel the channel over which to send the records.
+     * @param records the map of PIDs to AddrServerRecords to be synchronized.
      */
-    public void sendAllAddrServerRecordsToReplica(Long primaryPID, NIOMessageChannel nioChannel,
-                                         Map<Long, AddrServerRecord> registry) throws IOException {
-        for (AddrServerRecord record : registry.values()) {
-            UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToReplica(primaryPID, record);
+    public void sendAllAddrServerRecordsToReplica(Long senderPID, NIOMessageChannel nioChannel,
+                                                  Map<Long, AddrServerRecord> records) throws IOException {
+        // Safety Guard: Ensure records is not null and not empty
+        if (records == null || records.isEmpty()) {
+            debug(DEBUG_NORMAL, "No AddrServerRecords found to synchronize with REPLICA PID: " + nioChannel.getServerPID());
+            return;
+        }
+
+        for (AddrServerRecord record : records.values()) {
+            UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToReplica(senderPID, record);
             try {
                 nioChannel.sendMessage(message.toJson());
             } catch (JsonProcessingException e) {
-                System.err.println("Failed to serialize UpdateMessage<AddrServerRecord>: " + e.getMessage());
+                debug(DEBUG_BASIC, "Failed to serialize UpdateMessage<AddrServerRecord>: " + e.getMessage());
             } catch (IOException ioe) {
-                System.err.println("Failed to send UpdateMessage<AddrServerRecord>: " + ioe.getMessage());
+                debug(DEBUG_BASIC, "Failed to send UpdateMessage<AddrServerRecord>: " + ioe.getMessage());
                 throw ioe;
             }
         }
-        System.out.println("Done sending all AddrServerRecords to REPLICA with PID: " + nioChannel.getServerPID());
+        debug(DEBUG_NORMAL, "Done sending all " + records.size() + " AddrServerRecords to REPLICA with PID: " + nioChannel.getServerPID());
     }
 
     /**
@@ -265,24 +277,28 @@ public class BroadcastManager {
      * This is because we are only sending data to one recipient. No actions involving this recipient should continue, thus
      * an error is thrown and the calling code will be notified and have the option of handling it there, or passing it "up the chain".
      *
-     * @param primaryPID  the PID of the primary server sending the updates.
+     * @param senderPID  the PID of the (primary) server sending the updates.
      * @param nioChannel  the channel over which to send the records.
-     * @param registry a {@code HashMap} containing all {@code ChatServerRecord} entries.
+     * @param records a {@code HashMap} containing all {@code ChatServerRecord} entries.
      */
-    public void sendAllChatServerRecordsToReplica(Long primaryPID, NIOMessageChannel nioChannel,
-                                         Map<Long, ChatServerRecord> registry) throws IOException {
-        for (ChatServerRecord record : registry.values()) {
-            UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToReplica(primaryPID, record);
+    public void sendAllChatServerRecordsToReplica(Long senderPID, NIOMessageChannel nioChannel,
+                                                  Map<Long, ChatServerRecord> records) throws IOException {
+        if (records == null || records.isEmpty()) {
+            debug(DEBUG_DETAILED, "No ChatServerRecords found to synchronize with REPLICA PID: " + nioChannel.getServerPID());
+            return;
+        }
+        for (ChatServerRecord record : records.values()) {
+            UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToReplica(senderPID, record);
             try {
                 nioChannel.sendMessage(message.toJson());
             } catch (JsonProcessingException e) {
-                System.err.println("Failed to serialize UpdateMessage<ChatServerRecord>: " + e.getMessage());
+                debug(DEBUG_BASIC, "Failed to serialize UpdateMessage<ChatServerRecord>: " + e.getMessage());
             } catch (IOException ioe) {
-                System.err.println("Failed to send UpdateMessage<ChatServerRecord>: " + ioe.getMessage());
+                debug(DEBUG_BASIC, "Failed to send UpdateMessage<ChatServerRecord>: " + ioe.getMessage());
                 throw ioe;
             }
         }
-        System.out.println("Done sending all ChatServerRecords to REPLICA with PID: " + nioChannel.getServerPID());
+        debug(DEBUG_DETAILED, "Done sending all " + records.size() + " ChatServerRecords to REPLICA with PID: " + nioChannel.getServerPID());
     }
 
 
@@ -300,7 +316,7 @@ public class BroadcastManager {
      * are handled by the calling code, as no cleanup or recovery actions are performed within this method.
      * </p>
      *
-     * @param primaryPID         the PID of the primary server sending the records.
+     * @param senderPID         the PID of the (primary) addressing server sending the records.
      * @param nioChannel         the NIOMessageChannel over which the records are sent.
      * @param chatServerRegistry a {@code Map} containing all active {@code ChatServerRecord} entries,
      *                           keyed by their process IDs.
@@ -308,11 +324,11 @@ public class BroadcastManager {
      *                           keyed by their process IDs.
      * @throws IOException if an error occurs while sending any of the records.
      */
-    public void sendAllRecordsToReplica(Long primaryPID, NIOMessageChannel nioChannel,
+    public void sendAllRecordsToReplica(Long senderPID, NIOMessageChannel nioChannel,
                                         Map<Long, ChatServerRecord> chatServerRegistry,
                                         Map<Long, AddrServerRecord> addrServerRegistry) throws IOException {
-        this.sendAllAddrServerRecordsToReplica(primaryPID, nioChannel, addrServerRegistry);
-        this.sendAllChatServerRecordsToReplica(primaryPID, nioChannel, chatServerRegistry);
+        this.sendAllAddrServerRecordsToReplica(senderPID, nioChannel, addrServerRegistry);
+        this.sendAllChatServerRecordsToReplica(senderPID, nioChannel, chatServerRegistry);
     }
 
 
@@ -329,14 +345,14 @@ public class BroadcastManager {
      * It is assumed that an unrecoverable error means the channel should no longer be trusted.
      * </p>
      *
-     * @param primaryPID the PID of the Primary AddressingServer sending the updates.
+     * @param senderPID the PID of the (Primary) AddressingServer sending the updates.
      * @param nioChannel the {@link NIOMessageChannel} over which records are sent.
      * @param registry a {@code Map} of {@code AddrServerRecord} entries keyed by PID.
      */
-    public void sendAllAddrServerRecordsToCS(Long primaryPID, NIOMessageChannel nioChannel,
+    public void sendAllAddrServerRecordsToCS(Long senderPID, NIOMessageChannel nioChannel,
                                                   Map<Long, AddrServerRecord> registry) throws IOException {
         for (AddrServerRecord record : registry.values()) {
-            UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToCS(primaryPID, record);
+            UpdateMessage<AddrServerRecord> message = UpdateMessage.asRecordPrimaryToCS(senderPID, record);
             try {
                 nioChannel.sendMessage(message.toJson());
             } catch (JsonProcessingException e) {
@@ -361,14 +377,14 @@ public class BroadcastManager {
      * broken connection. Since this method is only used for targeted record sync,
      * cleanup is preferred over retry logic here.</p>
      *
-     * @param primaryPID the PID of the Primary AddressingServer sending the updates.
+     * @param senderPID the PID of the (Primary) AddressingServer sending the updates.
      * @param nioChannel the {@link NIOMessageChannel} used to send the updates.
      * @param registry a {@code Map} of {@code ChatServerRecord} entries keyed by PID.
      */
-    public void sendAllChatServerRecordsToCS(Long primaryPID, NIOMessageChannel nioChannel,
+    public void sendAllChatServerRecordsToCS(Long senderPID, NIOMessageChannel nioChannel,
                                                   Map<Long, ChatServerRecord> registry) throws IOException {
         for (ChatServerRecord record : registry.values()) {
-            UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToCS(primaryPID, record);
+            UpdateMessage<ChatServerRecord> message = UpdateMessage.csRecordPrimaryToCS(senderPID, record);
             try {
                 nioChannel.sendMessage(message.toJson());
             } catch (JsonProcessingException e) {
@@ -393,16 +409,91 @@ public class BroadcastManager {
      * upward or handle full synchronization retries. It assumes the calling component
      * will decide whether recovery, retry, or channel cleanup is appropriate.</p>
      *
-     * @param primaryPID the PID of the Primary AddressingServer sending the records.
+     * @param senderPID the PID of the (Primary) AddressingServer sending the records.
      * @param nioChannel the {@link NIOMessageChannel} used for the transmission.
      * @param chatServerRegistry a map of all {@code ChatServerRecord} entries, keyed by PID.
      * @param addrServerRegistry a map of all {@code AddrServerRecord} entries, keyed by PID.
      */
-    public void sendAllRecordsToCS(Long primaryPID, NIOMessageChannel nioChannel,
+    public void sendAllRecordsToCS(Long senderPID, NIOMessageChannel nioChannel,
                                         Map<Long, ChatServerRecord> chatServerRegistry,
                                         Map<Long, AddrServerRecord> addrServerRegistry) throws IOException {
-        this.sendAllAddrServerRecordsToCS(primaryPID, nioChannel, addrServerRegistry);
-        this.sendAllChatServerRecordsToCS(primaryPID, nioChannel, chatServerRegistry);
+        this.sendAllAddrServerRecordsToCS(senderPID, nioChannel, addrServerRegistry);
+        this.sendAllChatServerRecordsToCS(senderPID, nioChannel, chatServerRegistry);
+    }
+
+
+    /**
+     * Synchronizes the set of active Addressing Server Process IDs (PIDs) with a Replica.
+     * <p>
+     * This method encapsulates the provided PID set into a {@link PrimaryResponseMessage}
+     * and transmits it over the specified {@link NIOMessageChannel}. It allows Replicas
+     * to maintain a consistent view of the network and identify Addressing Server
+     * records that should be purged from their local registries.
+     * </p>
+     *
+     * @param senderPID  The process ID of the Primary Addressing Server initiating the sync.
+     * @param nioChannel The communication channel to the target Replica Addressing Server.
+     * @param activePids The current set of active Addressing Server PIDs in the network.
+     * @throws IOException If a network error occurs during transmission, requiring the caller to handle connection cleanup.
+     */
+    public void sendAddrServerPidsToReplica(Long senderPID, NIOMessageChannel nioChannel,
+                                            Set<Long> activePids) throws IOException {
+        if (activePids == null || activePids.isEmpty() || nioChannel == null) {
+            debug(DEBUG_BASIC, "[Broadcast Manager] Aborting PID sync: records or channel is null.");
+            return;
+        }
+
+        PrimaryResponseMessage<Set<Long>> message =
+                PrimaryResponseMessage.addrServerPidList(this.genMID.nextID(), senderPID, Roles.REPLICA, activePids);
+
+        try {
+            nioChannel.sendMessage(message.toJson());
+            debug(DEBUG_DETAILED, String.format("Successfully synced %d Peer PIDs to REPLICA (PID: %d)",
+                    activePids.size(), nioChannel.getServerPID()));
+
+        } catch (JsonProcessingException e) {
+            debug(DEBUG_BASIC, "Serialization error for Peer PID list: " + e.getMessage());
+        } catch (IOException ioe) {
+            debug(DEBUG_BASIC, "Network error syncing PIDs to REPLICA " + nioChannel.getServerPID() + ": " + ioe.getMessage());
+            throw ioe; // Re-throw error so the caller knows the connection is (likely) dead
+        }
+    }
+
+    /**
+     * Synchronizes the set of active Chat Server Process IDs (PIDs) with a Replica.
+     * <p>
+     * This method encapsulates the provided PID set into a {@link PrimaryResponseMessage}
+     * using the {@link ObjectTypes#PID_SET} identifier. This enables the Replica to
+     * verify its local registry against the Primary's state and remove stale
+     * Chat Server records.
+     * </p>
+     *
+     * @param senderPID  The process ID of the Primary Addressing Server initiating the sync.
+     * @param nioChannel The communication channel to the target Replica Addressing Server.
+     * @param activePids The current set of active Chat Server PIDs in the network.
+     * @throws IOException If a network error occurs during transmission, requiring the caller to handle connection cleanup.
+     */
+    public void sendChatServerPidsToReplica(Long senderPID, NIOMessageChannel nioChannel,
+                                            Set<Long> activePids) throws IOException {
+        if (activePids == null || activePids.isEmpty() || nioChannel == null) {
+            debug(DEBUG_BASIC, "[Broadcast Manager] Aborting ChatServer PID sync: records or channel is null.");
+            return;
+        }
+
+        PrimaryResponseMessage<Set<Long>> message =
+                PrimaryResponseMessage.chatServerPidList(this.genMID.nextID(), senderPID, Roles.REPLICA, activePids);
+
+        try {
+            nioChannel.sendMessage(message.toJson());
+            debug(DEBUG_DETAILED, String.format("Successfully synced %d ChatServer PIDs to REPLICA (PID: %d)",
+                    activePids.size(), nioChannel.getServerPID()));
+
+        } catch (JsonProcessingException e) {
+            debug(DEBUG_BASIC, "Serialization error for ChatServer PID list: " + e.getMessage());
+        } catch (IOException ioe) {
+            debug(DEBUG_BASIC, "Network error syncing ChatServer PIDs to REPLICA " + nioChannel.getServerPID() + ": " + ioe.getMessage());
+            throw ioe;
+        }
     }
 
 

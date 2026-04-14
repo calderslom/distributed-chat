@@ -1,113 +1,87 @@
-services:  # Defines the services (Docker containers) that will be run.
-  # These not be limited to
-
-  #<name_of_service>: # This is how we declare the "service" aka process we want to create an image of
-  #image: chatserver:latest  # The Docker image name and tag used to run this service
-  #build:
-  #context: ./chatserver  # The directory containing the Dockerfile for building this service
-  #dockerfile: Dockerfile  # The specific Dockerfile to use for building the image
-  #volumes:
-  #- db_data:/var/lib/mysql
-  #networks:
-  #- chat_network  # Connects this service to the 'chat_network' for communication
-  #ports:
-  #- "6667:6667"  # Maps port 6667 on the host to port 6667 in the container (used for communication)
-
+services:
+  # Services can be built and launched using (but not limited to) the following commands:
   # docker compose --profile chatservers up --build
   # docker compose --profile addressingserver up --build
   # docker compose --profile client create --build
   # docker compose run --rm --service-ports client
 
+  # Service for the initial Primary Addressing Server
   addressingserver:
-    image: addressingserver:latest
-    container_name: addressingserver
-    profiles: ["addressingserver", "main-single"]
+    image: addressing-server:dev
+    profiles: [ "addressingserver", "all" ]
     build:
+      context: .
       dockerfile: Dockerfile.addressingserver
     restart: on-failure
     environment:
-      - AS_CLIENT_PORT=${AS_CLIENT_PORT}
-      - AS_REPLICA_PORT=${AS_REPLICA_PORT}
-      - AS_CHATSERVER_PORT=${AS_CHATSERVER_PORT}
-      - HOST_ADDRESS=${PRIMARY_ADDRESS_SERVER_IP}
-      - PUBLIC_ADDRESS=${PUBLIC_ADDRESS}
-      - AS_ROLE=${AS_ROLE}
-      - PRIMARY_PEER_PORT=49801
-      
-    ports: ["49800:49800", "49801:49801","49802:49802","5050:5050"]
+      # Defaults to hardcoded values if no .env file is present
+      - AS_DEBUG_LEVEL=${AS_DEBUG_LEVEL:-3}
+      - AS_CLIENT_PORT=${AS_CLIENT_PORT:-49800}
+      - AS_REPLICA_PORT=${AS_REPLICA_PORT:-49801}
+      - AS_CHATSERVER_PORT=${AS_CHATSERVER_PORT:-49802}
+      - AS_ROLE=${AS_ROLE:-PRIMARY}
+    ports:
+      # Static port mapping for the Primary Addressing Server
+      # Host:Container -> modify the host ports if you are experiencing issues with port mapping
+      - "30001:49800"
+      - "30002:49801"
+      - "30003:49802"
+      - "30004:5050"
     networks:
       - chat_network
-#    healthcheck:
-#      test: [ "CMD", "sh", "/healthcheck.sh" ]
-#      interval: 30s
-#      timeout: 10s
-#      retries: 3
-#    restart: on-failure
+    volumes:
+      - ./data:/shared
 
-  # addressingserver_replicas:
-  #   image: addressingserver:latest
-  #   profiles: ["serverreplicas"]
-  #   environment:
-  #     - AS_CLIENT_PORT=49800
-  #     - AS_REPLICA_PORT=49801
-  #     - AS_CHATSERVER_PORT=49802
-  #     - AS_NETWORK=chat_network
-  #     - AS_ROLE=BACKUP
-  #     - HOST_ADDRESS=192.168.1.187
-  #   networks:
-  #     - chat_network
-  #   deploy:
-  #     replicas: 2
+  # Service for Replica addressing servers
+  addressingserver-backup:
+    extends:
+      service: addressingserver
+    profiles: [ "addressingserver-backup" ]
+    environment:
+      - AS_ROLE=REPLICA
+    ports: !reset []
 
   chatserver:
-    image: chatserver:latest
-    container_name: chatserver
-    profiles: ["chatserver", "main-single"]
+    image: chat-server:dev
+    profiles: [ "chatserver", "all"]
     build:
+      context: .
       dockerfile: Dockerfile.chatserver
     ports:
-      - "2424:2424"
-      - "2425:2425"
+      - 30100-30200:2424
+      - 30201-30300:2425
     environment:
-      - CS_PORT=${CS_PORT}
-      - CS_PEER_PORT=${CS_PEER_PORT}
-      - CS_ADDRSERVER_PORT=${CS_ADDRSERVER_PORT}
-      # Set host address to the address server ip
-      - HOST_ADDRESS=${PRIMARY_ADDRESS_SERVER_IP}
-      # Set address server ip to the address server ip
-      - ADDRESS_SERVER_IP=${PRIMARY_ADDRESS_SERVER_IP}
-      # The public address is your address
-      - PUBLIC_ADDRESS=${PUBLIC_ADDRESS}
+      - CS_DEBUG_LEVEL=${CS_DEBUG_LEVEL:-3}
+      - CS_CLIENT_PORT=${CS_CLIENT_PORT:-2424}
+      - CS_PEER_PORT=${CS_PEER_PORT:-2425}
+      - DEBUG_LEVEL=${DEBUG_LEVEL:-1}
     networks:
       - chat_network
-    # volumes:
-    #   - ./chatlogs:/app/src/main/java/com/Logs
+    volumes:
+      - ./data:/shared:ro # read-only access for Chat Servers
 
   client:
-    image: client:latest
-    container_name: client
-    profiles: ["client", "clients"]
+    image: client:dev
+    profiles: [ "client", "all" ]
     build:
+      context: .
       dockerfile: Dockerfile.client
-    ports: ["3000:3000"]
+      tags:
+        - "client:dev"
     environment:
-      - CLIENT_PORT=${CLIENT_PORT}
-      # Host address is the Address server address
-      - HOST_ADDRESS=${PRIMARY_ADDRESS_SERVER_IP}
-      # Address server ip is the address server address
-      - ADDRESS_SERVER_IP=${PRIMARY_ADDRESS_SERVER_IP}
-    # network_mode: "host"
+      - CLIENT_DEBUG_LEVEL=${CLIENT_DEBUG_LEVEL:-0}
+      - AS_CLIENT_PORT=${AS_CLIENT_PORT:-49800}
     networks:
       - chat_network
     tty: true
     stdin_open: true
+    volumes:
+      - ./data:/shared:ro # read-only access for Clients
 
 networks:
   chat_network:
     driver: "bridge"
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+
 # This is different from the volume we define in a service. This is how we can ensure that any data...configs:
 # ... that is created during the build or execution of the container(s), IS NOT deleted when the container is removed.
 # This is very powerful because it allows us to update our repository (new version), and in turn build new containers...configs:

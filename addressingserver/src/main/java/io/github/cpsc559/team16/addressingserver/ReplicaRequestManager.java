@@ -9,6 +9,7 @@ import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
 
 import java.io.IOException;
 import java.lang.ref.ReferenceQueue;
+import java.util.function.Supplier;
 
 /**
  * The {@code ReplicaRequestManager} is responsible for initiating outbound requests
@@ -29,12 +30,12 @@ public class ReplicaRequestManager {
 
     private static final int FULL_SYNC_THRESHOLD = 6;
 
+
     /**
-     * The outbound channel for communicating with the primary AddressingServer.
+     * Supplier for the outbound channel for communicating with the primary AddressingServer.
      * Assumes that this connection is already established and persistent.
      */
-    private NIOMessageChannel primaryChannel;
-
+    Supplier<NIOMessageChannel> primaryChannelSupplier;
 
     /**
      * Tracks how many sync requests this replica has made to the primary.
@@ -63,46 +64,133 @@ public class ReplicaRequestManager {
 
     /**
      * Constructs a {@code ReplicaRequestManager}.
-     *
      */
-    public ReplicaRequestManager(MessageIDGenerator messageIDGenerator, NIOMessageChannel primaryChannel) {
+    public ReplicaRequestManager(MessageIDGenerator messageIDGenerator, Supplier<NIOMessageChannel> nioChannelSupplier) {
         this.genMID = messageIDGenerator;
-        this.primaryChannel = primaryChannel;
+        this.primaryChannelSupplier = nioChannelSupplier;
     }
 
+    /**
+     * Executes a reliable transmission of a {@link RequestMessage} to the Primary AddressingServer.
+     * <p>
+     * This method implements a short-term retry loop with a 1-second backoff to handle transient
+     * network instability or DNS propagation delays during leader elections. It distinguishes
+     * between fatal errors (serialization) and recoverable errors (connection drops).
+     * </p>
+     * <p>
+     * Because this method utilizes a {@code primaryChannelSupplier}, it is self-healing; if a
+     * new Primary is elected during the retry window, the next iteration will automatically
+     * resolve the new {@link NIOMessageChannel} and attempt transmission there.
+     * </p>
+     *
+     * @param message The {@code RequestMessage} (typically containing a {@code Void} payload)
+     * to be sent to the Primary.
+     */
+    private void send(RequestMessage<Void> message) {
+        int attempts = 0;
+        int maxAttempts = 3;
 
+        while (attempts < maxAttempts) {
+            NIOMessageChannel primaryChannel = this.primaryChannelSupplier.get();
 
-    public void requestAllServerRecords(Long senderPID) {
-        RequestMessage<Void> message = RequestMessage.requestAllServerRecords(genMID.nextID(), senderPID);
-        try {
-            primaryChannel.sendMessage(message.toJson());
-        } catch (JsonProcessingException e) {
-            System.err.println("Failed to serialize RequestMessage<Void>AllServerRecords: " + e.getMessage());
-        } catch (IOException ioe) {
-            System.err.println("Failed to send RequestMessage<Void>AllServerRecords: " + ioe.getMessage());
+            if (primaryChannel != null && primaryChannel.getSocketChannel().isOpen()) {
+                try {
+                    // Stage 1: Serialization (FATAL if fails)
+                    String jsonPayload = message.toJson();
+
+                    // Stage 2: Transmission (RETRYABLE if fails)
+                    primaryChannel.sendMessage(jsonPayload);
+                    return;
+                } catch (JsonProcessingException e) {
+                    // No point in retrying - return to caller
+                    System.err.println("Failed to serialize RequestMessage<Void>: " + e.getMessage());
+                    return;
+                } catch (IOException e) {
+                    attempts++;
+                    System.err.printf("[RQST MGR] Send failed (Attempt %d/%d): %s%n",
+                            attempts, maxAttempts, e.getMessage());
+                }
+            } else {
+                attempts++;
+                System.err.printf("[RQST MGR] Request skipped: No active connection to Primary (Attempt %d/%d).%n",
+                        attempts, maxAttempts);
+            }
+
+            // Short backoff to let the Primary/DNS settle
+            if (attempts < maxAttempts) {
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
+        System.err.println("[RQST MGR] Sync request aborted after max retries.");
     }
 
-    public void requestAllChatServerRecords(Long senderPID) {
-        RequestMessage<Void> message = RequestMessage.requestAllChatServerRecords(genMID.nextID(), senderPID);
-        try {
-            primaryChannel.sendMessage(message.toJson());
-        } catch (JsonProcessingException e) {
-            System.err.println("Failed to serialize RequestMessage<Void>AllChatServerRecords: " + e.getMessage());
-        } catch (IOException ioe) {
-            System.err.println("Failed to send RequestMessage<Void>AllChatServerRecords: " + ioe.getMessage());
-        }
+    /**
+     * Initiates a full synchronization request for all registered server records
+     * (both AddressingServers and ChatServers).
+     * <p>
+     * This is typically called every Nth cycle by the {@code ReplicaRequestCoordinator}
+     * to ensure absolute state consistency across the cluster.
+     * </p>
+     */
+    public void requestAllServerRecords() {
+        RequestMessage<Void> message = RequestMessage.requestAllServerRecords(genMID.nextID(), genMID.getPID());
+        send(message);
     }
 
-    public void requestAllAddrServerRecords(Long senderPID) {
-        RequestMessage<Void> message = RequestMessage.requestAllAddrServerRecords(genMID.nextID(), senderPID);
-        try {
-            primaryChannel.sendMessage(message.toJson());
-        } catch (JsonProcessingException e) {
-            System.err.println("Failed to serialize RequestMessage<Void>AllAddrServerRecords: " + e.getMessage());
-        } catch (IOException ioe) {
-            System.err.println("Failed to send RequestMessage<Void>AllAddrServerRecords: " + ioe.getMessage());
-        }
+    /**
+     * Initiates a synchronization request specifically for {@code ChatServerRecord}s.
+     * <p>
+     * This is the high-frequency sync path used to keep the Replica updated on
+     * active chat instances without the overhead of a full system state transfer.
+     * </p>
+     */
+    public void requestAllChatServerRecords() {
+        RequestMessage<Void> message = RequestMessage.requestAllChatServerRecords(genMID.nextID(), genMID.getPID());
+        send(message);
+    }
+
+    /**
+     * Initiates a synchronization request specifically for {@code AddrServerRecord}s.
+     * <p>
+     * Used primarily to update the Replica's internal view of the AddressingServer
+     * cluster topology (e.g. discovering new Replicas or PIDs).
+     * </p>
+     */
+    public void requestAllAddrServerRecords() {
+        RequestMessage<Void> message = RequestMessage.requestAllAddrServerRecords(genMID.nextID(), genMID.getPID());
+        send(message);
+    }
+
+    /**
+     * Broadcasts a request to the Primary Addressing Server to retrieve a complete
+     * collection of PIDs for all currently registered Addressing Servers (Peers).
+     * <p>
+     * This is typically used to synchronize local state and identify stale
+     * Addressing Server records that are no longer active in the network.
+     * </p>
+     */
+    public void requestAllAddrServerPids() {
+        RequestMessage<Void> message = RequestMessage.requestAllPeerPids(genMID.nextID(), genMID.getPID());
+        send(message);
+    }
+
+    /**
+     * Broadcasts a request to the Primary Addressing Server to retrieve a complete
+     * collection of PIDs for all currently registered Chat Servers.
+     * <p>
+     * This allows the local server to verify its peer registry against the Primary's
+     * "source of truth" and purge any records for Chat Servers that have
+     * disconnected without a proper shutdown.
+     * </p>
+     */
+    public void requestAllChatServerPids() {
+        RequestMessage<Void> message = RequestMessage.requestAllChatServerPids(genMID.nextID(), genMID.getPID());
+        send(message);
     }
 
 
@@ -120,8 +208,5 @@ public class ReplicaRequestManager {
         this.syncRequestCounter = ++this.syncRequestCounter % FULL_SYNC_THRESHOLD;
         return this.syncRequestCounter == 0;
     }
-
-    // Future ideas:
-    // public void reportPrimaryFailure(...)
 
 }

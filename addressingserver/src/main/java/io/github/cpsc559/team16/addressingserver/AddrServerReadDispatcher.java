@@ -1,15 +1,19 @@
 package io.github.cpsc559.team16.addressingserver;
 
 import java.io.IOException;
-import java.net.Socket;
 import java.nio.channels.SocketChannel;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ChatServerRecord;
 import io.github.cpsc559.team16.common.exceptions.ConnectionClosedException;
+import io.github.cpsc559.team16.common.logging.DebugLogger;
+import io.github.cpsc559.team16.common.logging.ServerDebugLogger;
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 import io.github.cpsc559.team16.common.messaging.*;
+
 
 import static io.github.cpsc559.team16.common.messaging.MessageDeserializer.deserializeMessage;
 import io.github.cpsc559.team16.common.utilities.NIOMessageChannel;
@@ -85,7 +89,7 @@ public class AddrServerReadDispatcher {
      * 
      * @return A Long representing the process ID for this process in the network.
      */
-    private Long getPID() {
+    private Long getMyPID() {
         return this.server.getConfig().getPID();
     }
 
@@ -143,6 +147,8 @@ public class AddrServerReadDispatcher {
             case MessageTypes.NOTIFICATION -> handleNotification(channel, nioChannel, message);
             case MessageTypes.SERVERFAILURE -> handleServerFailure(channel, nioChannel, message);
             case MessageTypes.ELECTION -> handleElection(channel, nioChannel, message);
+            case MessageTypes.SHUTDOWN -> handleShutdownRequest(message);
+            case MessageTypes.PRIMARY_RESPONSE -> handlePrimaryResponse(nioChannel, message);
             default -> System.err.println("Unrecognized message type: " + message.getMsgType());
         }
     }
@@ -190,27 +196,52 @@ public class AddrServerReadDispatcher {
     private void handleAck(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> ackMessage) {
         switch (ackMessage.getObjectType()) {
             case AckObjectTypes.REGISTERED -> {
-                System.out.println("ACK ENTERED");
-                // This should ONLY ever be received by a REPLICA from the PRIMARY
-                // AddressingServer
-                // A Registration ACK is always sent with the pid as a string for the process as
-                // the payload.
+                // This should ONLY ever be received by a REPLICA from the PRIMARY AddressingServer
+                // A Registration ACK is always sent with the pid as a string for the process as the payload.
                 Long assignedPID = ackMessage.safeCastPayload(Long.class);
+                long primaryPID = ackMessage.getSenderPID();
+
+                if (primaryPID <= 0) {
+                    System.err.println("[ERROR] Primary sent a REGISTRATION ACK with an invalid PID: " + primaryPID);
+                    return;
+                }
+                else if (assignedPID == null) {
+                    System.err.println("[REGISTRATION ERROR] Assigned PID is 'null'; registration failed.");
+                    return;
+                }
                 server.getConfig().setPID(assignedPID);
-                genMID.setPID(assignedPID);
-                // This nioChannel was used to send the REGISTER message that triggered this
-                // ACK.
-                // We didn't know the PRIMARY AddressingServer PID when making that initial
-                // connection -> Set it now
-                nioChannel.setServerPID(ackMessage.getSenderPID());
-                System.out.println("Registration ACK received. This process has been assigned PID #"
+                // This nioChannel was used to send the REGISTER message that triggered this ACK.
+                // We didn't know the PRIMARY AddressingServer PID when making that initial connection -> Set it now
+                nioChannel.setServerPID(primaryPID);
+                debug(DEBUG_NORMAL, "Registration ACK received. This process has been assigned PID #"
                         + server.getConfig().getPID());
             }
             case AckObjectTypes.REPLICATED -> {
-                System.out.println("Replicated message received.");
+                DebugLogger.debug(DEBUG_DETAILED, "Replicated ACK received.");
                 handleReplicationAck(ackMessage);
             }
-            default -> System.err.println("Unrecognized ACK response: " + ackMessage.getObjectType());
+            case AckObjectTypes.SYNCHRONIZED -> {
+                // Stage 1: Validate the PID in the Payload
+                Long assignedPID = ackMessage.safeCastPayload(Long.class);
+                long primaryPID = ackMessage.getSenderPID();
+                // Stage 2: Ensure the Primary actually identified itself
+                if (primaryPID <= 0) {
+                    System.err.println("[SYNC ERROR] Primary sent a SYNCHRONIZED ACK with an invalid PID: " + primaryPID);
+                    return;
+                }
+                // Stage 4: Ensure the assigned PID matches my PID
+                if (assignedPID == null || !assignedPID.equals(this.server.getConfig().getPID())) {
+                    System.err.println("[SYNC ERROR] PID Mismatch. Expected: " + this.getMyPID() + ", Got: " + assignedPID);
+                    return;
+                }
+                // Stage 5: Link this NIOMessageChannel to its process by setting the PID
+                nioChannel.setServerPID(primaryPID);
+
+                debug(DEBUG_NORMAL,
+                        "Synchronization successful. Established persistent link to PRIMARY (PID: " + primaryPID + ")");
+            }
+
+            default -> debug(DEBUG_BASIC, "Unrecognized ACK response: " + ackMessage.getObjectType());
         }
     }
 
@@ -231,13 +262,14 @@ public class AddrServerReadDispatcher {
                         nioChannel);
                 if (updatedRecord != null) { // Broadcast ClientCountMessage to all servers.
                     System.out.println("Client directed to an active host.");
-                    Long pid = this.getPID();
+                    Long pid = this.getMyPID();
                     this.broadcastManager.broadcastChatServerRecord(pid, updatedRecord); // Broadcast the updated
                                                                                          // (client count) record to all
                                                                                          // servers.
-                    this.server.getChatServerRegistry().debugPrintServer(updatedRecord);
+                    ServerDebugLogger.printChatServer(updatedRecord);
                 } else {
                     System.out.println("All ChatServer's are either FULL or INACTIVE");
+                    // TODO: respond to client, informing them the service is currently at max capacity
                 }
             }
             case Roles.CHATSERVER -> {
@@ -270,7 +302,7 @@ public class AddrServerReadDispatcher {
                         try {
                             ChatServerRecord updatedRecord = this.server.getChatServerRegistry()
                                     .updateClientCount(newClientCount, csPid);
-                            broadcastManager.broadcastChatServerRecordToCS(this.getPID(), updatedRecord);
+                            broadcastManager.broadcastChatServerRecordToCS(this.getMyPID(), updatedRecord);
                             // peerManager.broadcastChatServerRecord(this.getPID(), updatedRecord);
                             // chatServerManager.broadcastChatServerRecord(this.getPID(), updatedRecord);
                         } catch (NullPointerException e) {
@@ -334,6 +366,43 @@ public class AddrServerReadDispatcher {
     }
 
     /**
+     * Processes incoming response messages from the Primary Addressing Server.
+     * <p>
+     * This handler identifies the requested data type (e.g., PID sets for active servers)
+     * and uses {@code safeCastPayload} to retrieve the collection before triggering
+     * the appropriate registry cleanup.
+     * </p>
+     *
+     * @param nioChannel      The channel from which the message was received.
+     * @param responseMessage The base message object containing the response payload.
+     */
+    private void handlePrimaryResponse(NIOMessageChannel nioChannel,
+                                       BaseAddrServerMessage<?> responseMessage) {
+
+        // Ensure the sender is actually the PRIMARY before processing
+        if (!responseMessage.getSenderRole().equals(Roles.PRIMARY)) {
+            debug(DEBUG_BASIC, "Received PrimaryResponse from non-primary role: " + responseMessage.getSenderRole());
+            return;
+        }
+
+        switch (responseMessage.getObjectType()) {
+            case ResponseObjectTypes.ALL_PEER_PIDS -> {
+                Set<Long> activePeerPids = responseMessage.safeCastPayloadToLongSet();
+                if (activePeerPids != null) {
+                    this.server.getAddrServerRegistry().purgeStaleRecords(activePeerPids);
+                }
+            }
+            case ResponseObjectTypes.ALL_CS_PIDS -> {
+                Set<Long> activeChatPids = responseMessage.safeCastPayloadToLongSet();
+                if (activeChatPids != null) {
+                    this.server.getChatServerRegistry().purgeStaleRecords(activeChatPids);
+                }
+            }
+            default -> debug(DEBUG_LOW_LEVEL, "No handler defined for PrimaryResponse object type: " + responseMessage.getObjectType());
+        }
+    }
+
+    /**
      * Handles a request message based on the sender role and object type.
      *
      * @param channel        The channel from which the request originated.
@@ -347,7 +416,7 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.ALL_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllRecordsToCS(this.getPID(), nioChannel,
+                                broadcastManager.sendAllRecordsToCS(this.getMyPID(), nioChannel,
                                         this.server.getChatServerRegistry().getRecords(),
                                         this.server.getAddrServerRegistry().getRecords());
                             } catch (IOException e) {
@@ -360,7 +429,7 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.CHAT_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllChatServerRecordsToCS(this.getPID(), nioChannel,
+                                broadcastManager.sendAllChatServerRecordsToCS(this.getMyPID(), nioChannel,
                                         this.server.getChatServerRegistry().getRecords());
                             } catch (IOException e) {
                                 System.err.printf(
@@ -372,7 +441,7 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.ADDR_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllAddrServerRecordsToCS(this.getPID(), nioChannel,
+                                broadcastManager.sendAllAddrServerRecordsToCS(this.getMyPID(), nioChannel,
                                         this.server.getAddrServerRegistry().getRecords());
                             } catch (IOException e) {
                                 System.err.printf(
@@ -390,7 +459,8 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.ALL_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllRecordsToReplica(this.getPID(), nioChannel,
+                                this.server.getLeaderElectionManager().performRegistryAudit();
+                                broadcastManager.sendAllRecordsToReplica(this.getMyPID(), nioChannel,
                                         this.server.getChatServerRegistry().getRecords(),
                                         this.server.getAddrServerRegistry().getRecords());
                             } catch (IOException e) {
@@ -403,7 +473,8 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.CHAT_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllChatServerRecordsToReplica(this.getPID(), nioChannel,
+                                chatServerManager.auditRegistryConnections(this.getMyPID(), cleanupManager);
+                                broadcastManager.sendAllChatServerRecordsToReplica(this.getMyPID(), nioChannel,
                                         this.server.getChatServerRegistry().getRecords());
                             } catch (IOException e) {
                                 System.err.printf(
@@ -415,11 +486,36 @@ public class AddrServerReadDispatcher {
                     case (RequestObjectTypes.ADDR_SERVER_RECORDS) -> {
                         executorService.submit(() -> {
                             try {
-                                broadcastManager.sendAllAddrServerRecordsToReplica(this.getPID(), nioChannel,
+                                peerManager.auditRegistryConnections(this.getMyPID(), cleanupManager);
+                                broadcastManager.sendAllAddrServerRecordsToReplica(this.getMyPID(), nioChannel,
                                         this.server.getAddrServerRegistry().getRecords());
                             } catch (IOException e) {
                                 System.err.printf(
                                         "IOException triggered while responding to ADDR_SERVER_RECORDS request (PID: %d). Triggering connection cleanup.%n",
+                                        nioChannel.getServerPID());
+                            }
+                        });
+                    }
+                    case (RequestObjectTypes.ALL_PEER_PIDS) -> {
+                        executorService.submit(() -> {
+                            try {
+                                broadcastManager.sendAddrServerPidsToReplica(this.getMyPID(), nioChannel,
+                                        this.server.getAddrServerRegistry().getRecords().keySet());
+                            } catch (IOException e) {
+                                System.err.printf(
+                                        "IOException triggered while responding to ALL_PEER_PIDS request (PID: %d). Triggering connection cleanup.%n",
+                                        nioChannel.getServerPID());
+                            }
+                        });
+                    }
+                    case (RequestObjectTypes.ALL_CS_PIDS) -> {
+                        executorService.submit(() -> {
+                            try {
+                                broadcastManager.sendChatServerPidsToReplica(this.getMyPID(), nioChannel,
+                                        this.server.getChatServerRegistry().getRecords().keySet());
+                            } catch (IOException e) {
+                                System.err.printf(
+                                        "IOException triggered while responding to ALL_CS_PIDS request (PID: %d). Triggering connection cleanup.%n",
                                         nioChannel.getServerPID());
                             }
                         });
@@ -460,7 +556,7 @@ public class AddrServerReadDispatcher {
             Long failedPID = message.safeCastPayload(Long.class);
             System.out.println("Replica received ServerFailure message for network PID: " + failedPID);
             this.replicaCoordinator.processFailureMessageSendAck(message, nioChannel,
-                    this.getPID(), this.cleanupManager, failedPID);
+                    this.getMyPID(), this.cleanupManager, failedPID);
         } else {
             String serverType = message.getObjectType();
             Long failedPID = message.safeCastPayload(Long.class);
@@ -485,19 +581,6 @@ public class AddrServerReadDispatcher {
             }
 
         }
-
-        // switch (message.getObjectType()) {
-        // case ObjectTypes.ADDRSERVER_FAILURE -> {
-        // Long failedPID = message.safeCastPayload(Long.class);
-        // this.replicaCoordinator.processFailureMessageSendAck(message, nioChannel,
-        // this.getPID(), this.cleanupManager, failedPID);
-        // }
-        // case ObjectTypes.CHATSERVER_FAILURE -> {
-        // Long failedPID = message.safeCastPayload(Long.class);
-        // chatServerManager.removeFailedChatServer(failedPID);
-        // this.server.getChatServerRegistry().debugPrintAllServers();
-        // }
-        // }
     }
 
     /**
@@ -526,7 +609,7 @@ public class AddrServerReadDispatcher {
                             record.setClientCount(clientCount);
                             System.out.println("Updated client count for " + chatServerId + " to " + clientCount);
                             // Broadcast the updated record to all connected AddressingServers
-                            broadcastManager.broadcastChatServerRecord(this.getPID(), record);
+                            broadcastManager.broadcastChatServerRecord(this.getMyPID(), record);
                         } else {
                             System.err.println("Received client count update for unknown chat server: " + chatServerId);
                         }
@@ -552,5 +635,56 @@ public class AddrServerReadDispatcher {
             BaseAddrServerMessage<?> electionMessage) {
         server.getLeaderElectionManager().processElectionMessage(channel, nioChannel, electionMessage);
     }
+
+
+    /**
+     * Handles a shutdown request message.
+     * <p>
+     * This method validates that the shutdown request is explicitly targeted
+     * at this AddressingServer instance by comparing the payload PID with
+     * this process's PID. The payload is expected to contain a {@link Long}
+     * representing the network PID of the process that should terminate.
+     * </p>
+     * <p>
+     * If the PID matches, a graceful shutdown is initiated via the
+     * {@code NetworkManager}. If the PID does not match, the message is ignored
+     * and logged as invalid.
+     * </p>
+     *
+     * @param shutdownMessage The received shutdown message containing the
+     *                        target process PID as its payload.
+     */
+    private void handleShutdownRequest(BaseAddrServerMessage<?> shutdownMessage) {
+        // Failsafe - check message (payload) PID to ensure request matches this processes PID.
+        Long failedPID = shutdownMessage.safeCastPayload(Long.class);
+        if (this.getMyPID().equals(failedPID)) {
+            System.out.println("Shutdown request validated - this process has been flagged for termination.");
+            server.shutdown();
+            // Terminate the JVM immediately
+            System.exit(0);
+        }
+        else {
+            System.out.printf("Invalid shutdown message received - target PID = %d but this PID = %d\n", failedPID, this.getMyPID());
+        }
+
+    }
+
+    /**
+     * Routes a synchronization request to the centralized RegistrationCoordinator.
+     * <p>
+     * This method acts as a thin delegation layer, decoupling the network event
+     * dispatching from the complex business logic of server identity validation.
+     * </p>
+     *
+     * @param channel    the raw socket channel of the connecting process
+     * @param nioChannel the message-oriented wrapper for the socket
+     * @param msg        the incoming synchronization message
+     * @param role       the claimed role of the sender (e.g., CHATSERVER or REPLICA)
+     */
+    public void handleSynchronizationRequest(SocketChannel channel, NIOMessageChannel nioChannel, BaseAddrServerMessage<?> msg, String role) {
+        this.server.getRegistrationCoordinator().synchronizeServer(channel, nioChannel, msg, role);
+    }
+
+
 
 }

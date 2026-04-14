@@ -12,6 +12,9 @@ import java.util.Iterator;
 
 import io.github.cpsc559.team16.common.dto.AddrServerRecord;
 import io.github.cpsc559.team16.common.dto.ServerRole;
+import io.github.cpsc559.team16.common.messaging.Roles;
+
+import static io.github.cpsc559.team16.common.logging.DebugLogger.*;
 
 /**
  * <h1>PingManager</h1>
@@ -24,11 +27,11 @@ import io.github.cpsc559.team16.common.dto.ServerRole;
  *
  * <h2>Key Features:</h2>
  * <ul>
- *     <li>Periodically pings all peers (excluding self) to verify connectivity.</li>
- *     <li>Uses an exponential moving average (EMA) of the round‐trip time (RTT) per peer.</li>
- *     <li>Computes a per-peer timeout threshold as: max(estimatedRTT, safeDefaultRTT) * marginFactor.</li>
- *     <li>The safe default RTT prevents false positives when no measurements exist or during network spikes.</li>
- *     <li>If a peer’s last successful ping is older than its timeout threshold, it is flagged (and may be removed).</li>
+ * <li>Periodically pings all peers (excluding self) to verify connectivity.</li>
+ * <li>Uses an exponential moving average (EMA) of the round‐trip time (RTT) per peer.</li>
+ * <li>Computes a per-peer timeout threshold as: max(estimatedRTT, safeDefaultRTT) * marginFactor.</li>
+ * <li>The safe default RTT prevents false positives when no measurements exist or during network spikes.</li>
+ * <li>If a peer’s last successful ping is older than its timeout threshold, it is flagged (and may be removed).</li>
  * </ul>
  *
  * <h2>Threading Model:</h2>
@@ -62,7 +65,7 @@ public class PingManager implements Runnable {
      * Smoothing factor (alpha) for the exponential moving average. Must be in (0,1].
      * A higher value gives more weight to recent samples.
      */
-    private final double alpha = 0.2; 
+    private final double alpha = 0.2;
 
     /**
      * Margin multiplier applied to the estimated RTT when computing a timeout threshold.
@@ -100,18 +103,18 @@ public class PingManager implements Runnable {
     /**
      * Runs the periodic ping process. For each round, the manager:
      * <ol>
-     *   <li>Opens new non-blocking connections to all peers (excluding self).</li>
-     *   <li>Records the time each connection attempt starts.</li>
-     *   <li>Waits for connection completion (using a Selector with safeDefaultRTT as the maximum wait).</li>
-     *   <li>When a connection is finished, computes a sample RTT and updates the EMA estimate for that peer.</li>
-     *   <li>Updates the last successful ping time for each peer.</li>
-     *   <li>Checks, for each peer, whether the elapsed time since the last ping exceeds its computed timeout threshold.
-     *       If so, the peer is flagged as having missed its ping (and may be removed).</li>
+     * <li>Opens new non-blocking connections to all peers (excluding self).</li>
+     * <li>Records the time each connection attempt starts.</li>
+     * <li>Waits for connection completion (using a Selector with safeDefaultRTT as the maximum wait).</li>
+     * <li>When a connection is finished, computes a sample RTT and updates the EMA estimate for that peer.</li>
+     * <li>Updates the last successful ping time for each peer.</li>
+     * <li>Checks, for each peer, whether the elapsed time since the last ping exceeds its computed timeout threshold.
+     * If so, the peer is flagged as having missed its ping (and may be removed).</li>
      * </ol>
      */
     @Override
     public void run() {
-        System.out.println("PingManager: Started!");
+        debug(DEBUG_BASIC, "PingManager: Started!");
 
         // Map of SocketChannel to the associated peer PID for each ping attempt.
         HashMap<SocketChannel, Long> channelPIDs;
@@ -130,12 +133,12 @@ public class PingManager implements Runnable {
             try {
                 Thread.sleep(5000);
             } catch (InterruptedException e) {
-                System.err.println("PingManager sleep interrupted: " + e.getMessage());
+                debug(DEBUG_BASIC, "PingManager sleep interrupted: " + e.getMessage());
             }
 
             // Only proceed with pinging if the server is in replica mode.
             if (!isPrimary()) {
-                System.out.println("ROLE: REPLICA");
+                debug(DEBUG_LOW_LEVEL, "ROLE: REPLICA");
                 try (Selector selector = Selector.open()) {
                     // Reinitialize per-round maps (for new connection attempts).
                     channelPIDs = new HashMap<>();
@@ -199,7 +202,7 @@ public class PingManager implements Runnable {
                                     // Update the last successful ping (pong) time for this peer.
                                     lastPingFromPID.put(channelPIDs.get(ch), new Date());
                                 } catch (IOException e) {
-                                    System.err.println("PingManager: Failed to finish connection for a peer: " + e.getMessage());
+                                    debug(DEBUG_BASIC, "PingManager: Failed to finish connection for a peer: " + e.getMessage());
                                     key.cancel();
                                 }
                             }
@@ -217,17 +220,17 @@ public class PingManager implements Runnable {
                             // Compute the timeout threshold using the safe default as a lower bound.
                             long timeoutThreshold = Math.max(estimatedRTT, safeDefaultRTT);
                             timeoutThreshold = (long) (timeoutThreshold * marginFactor);
-                            System.out.println("PingManager: Pinging peer: " + peer.getPID());
+                            debug(DEBUG_LOW_LEVEL, "PingManager: Pinging peer: " + peer.getPID());
                             if (diff > timeoutThreshold) {
                                 // server.getPeerManager().removeFailedServer(peer.getPID());
                             }
                         }
                     }
                 } catch (IOException e) {
-                    System.err.println("PingManager: Error while pinging peers: " + e.getMessage());
+                    debug(DEBUG_BASIC, "PingManager: Error while pinging peers: " + e.getMessage());
                 }
             } else {
-                System.out.println("ROLE: PRIMARY");
+                debug(DEBUG_EXTREME, "ROLE: PRIMARY");
                 try {
                     Thread.sleep(5000);
                 } catch (Exception e) {
