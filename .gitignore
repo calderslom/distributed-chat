@@ -414,3 +414,9 @@ out/
 # Ignore the chatlogs 
 
 chatlogs/
+
+# --------------
+# Docker runtime
+# --------------
+# Ignore local override files but keep the main compose file
+docker-compose.override.yml
