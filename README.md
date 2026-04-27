@@ -221,10 +221,6 @@ make full-network-build
 
 ***Without Make:***
 ```bash
-# Build images for each service
-docker compose build
-
-# Spin up the containers
 docker compose --profile all up -d --no-deps --scale addressingserver-backup=2 --scale chatserver=2 --scale client=0
 ```
 
