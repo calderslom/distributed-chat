@@ -5,13 +5,16 @@ A fault-tolerant and scalable chat system built in Java (JDK 21),
 deployed via Docker. Designed around distributed systems principles including
 gossip-based replication, dynamic client routing, and automatic failure recovery.
 
-### Client GUI
+### Client Interface
 
 ---------------------------------------------------------
 
 ![Alice and Bob demonstrating fault-tolerant 
 messaging across several chat servers](docs/images/chat_log_example.jpg)
 
+
+Two clients demonstrate synchronized messaging and automatic 
+recovery after a chat server failure.
 
 ### Background
 
@@ -56,6 +59,16 @@ The entire system is containerized through Docker — with Gradle handling
 dependency resolution and builds inside the container. As a result, Docker is the 
 only prerequisite to run the system on any platform.
 
+### Core Features
+
+---------------------------------------------------------------------------------------
+
+- Gossip-based replication
+- Dynamic client routing
+- Automatic failover and recovery
+- Strong consistency across addressing replicas
+- Automatic client reconnection and message retry
+
 
 ### Architecture
 
@@ -74,7 +87,7 @@ Chat Servers
 protocol with vector timestamp ordering.
 
 Clients
-- Connect via a command-line style GUI.
+- Connect via a command-line interface.
 - Automatically reconnect to the network and resend unacknowledged messages
 when a disconnection occurs.
 
@@ -161,7 +174,7 @@ maintaining the integrity of the network.
 #### Deployable On Any Machine Running Docker
 Gradle is used in conjunction with Docker to automatically pull the dependencies 
 required to build the image for each service: addressingserver, chatserver, client.
-Individual docker containers are then spun up for process using these images, meaning that
+Individual docker containers are then spun up for processes using these images, meaning that
 any platform capable of running Docker can run each component of the system.
 
 ### Tech Stack
@@ -179,17 +192,27 @@ any platform capable of running Docker can run each component of the system.
 - Docker
 - Make (optional, for convenience commands)
 
+#### Clone the repository
+```bash
+git clone https://github.com/calderslom/distributed-chat.git
+```
 
-#### Setting the granularity of system logging
+#### Navigate to the root directory
+```bash
+cd distributed-chat
+```
 
-- Each service has its own 'debug level' with a range of [0,5] — with a setting of five 
-providing the most verbose system reporting.
-    - These are defined as environment variables in the root directory's .env file.
-    - A setting of zero is recommended for the Client service if you intend to use the 
-     client as a chatroom.
+#### Configure logging levels (if desired)
+
+- Each service has its own 'debug level' with a range of [0,5] — a setting of 5
+  provides the most verbose system reporting.
+    - These are defined as environment variables in the .env file found in the root directory.
+    - Use 0 for the Client service if you plan to use it as a chatroom.
 
 
-#### Start the network (primary addressing server, two replicas, and two chat servers)
+#### Start the default network
+
+- Ensure Docker is running before proceeding.
 
 ***With Make:***
 ```bash
@@ -199,20 +222,30 @@ make full-network-build
 ***Without Make:***
 ```bash
 # Build images for each service
-docker compose build --no-cache
+docker compose build
 
 # Spin up the containers
 docker compose --profile all up -d --no-deps --scale addressingserver-backup=2 --scale chatserver=2 --scale client=0
 ```
 
+#### Confirm network operation
+
+```bash
+docker ps
+```
+
+- You should see the addressing server, two replicas, and two chat servers running.
+
 #### Connecting to the chatroom
 
-Each client uses an interactive terminal for its GUI. Open a new terminal, navigate to
-the root directory, and run:
+- Each client session runs in an interactive terminal. To start the session, open a new terminal,
+navigate to the root directory and run:
 
 ```bash
 docker compose run --rm client
 ```
+
+- Repeat in multiple terminals to simulate multiple users.
 
 ### Known Limitations
 
